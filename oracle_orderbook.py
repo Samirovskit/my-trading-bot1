@@ -1,67 +1,14 @@
 #!/usr/bin/env python3
 """
-oracle_orderbook.py - PRODUCTION ORDER BOOK v4.2 (CORRECTED)
+oracle_orderbook.py - ORACLE ORDER BOOK v4.2 — SHARED CORE COMPONENT
 
-Complete order book management system for cryptocurrency trading.
-Usage test:
-    python3 oracle_orderbook.py                                         # Show help
-    python3 oracle_orderbook.py unit                                 # Run unit tests (no network needed)
-    python3 oracle_orderbook.py stats                               # Test connection configuration
-    python3 oracle_orderbook.py limits                              # Test capacity limits
-    python3 oracle_orderbook.py live [sec]                        # Single symbol live test (default 30s)
-    python3 oracle_orderbook.py multi [sec] [pairs]        # Multi-symbol test
-    python3 oracle_orderbook.py health                            # Health monitoring
-    python3 oracle_orderbook.py stress [sec]                  # Maximum symbols stress test
-    python3 oracle_orderbook.py reconnect [sec]           # Reconnection stability test
-    python3 oracle_orderbook.py backtest                       # Backtest simulation test
-    python3 oracle_orderbook.py all                                   # Run everything
-    python3 test_orderbook_full.py                                     # Run comprehensive tests
-   python3 test_orderbook_full.py --quick                        # Quick unit tests only (no network)
-   python3 test_orderbook_full.py --no-live                      # Skip live tests
-   python3 test_orderbook_full.py --no-perf                    # Skip performance tests
-   
-1️⃣screen -S orderbook_stress     # Run 24-hour stress test     python3 oracle_orderbook.py stress 86400   # Detach: Ctrl+A, then D 
-                                                             # Reconnect later                    screen -r orderbook_stress
-2️⃣# Install memory profiler              pip install memory-profiler
-    # Create memory test script
-cat > test_memory.py << 'EOF'
-from memory_profiler import profile
-from oracle_orderbook import *
-import time
-@profile
-def test_memory():
-    manager = OrderBookManager(multi_symbol=True, store_history=False)
-    manager.subscribe_many(ALL_TRADING_SYMBOLS[:50])    
-    print("Running for 60 seconds...")
-    time.sleep(60)    
-    print("Stopping...")
-    manager.stop()
-if __name__ == "__main__":
-    test_memory()
-EOF
+Pure. Silent. Eternal.
+Used by both Live Trading Engine and Backtest Simulator.
+No tests. No prints. No mercy.
 
-    # Run with profiling        python3 -m memory_profiler test_memory.py
-    # Add at top of script for verbose logging
-import logging
-logging.getLogger('oracle_orderbook').setLevel(logging.DEBUG)
-
-Features:
-- Real-time WebSocket streaming (Binance, CCXT Pro)
-- Synthetic order book generation from ticks/candles
-- Order flow tracking and analysis
-- Execution simulation with slippage modeling
-- Backtest support with historical replay
-- Health monitoring and alerting
-
-Usage:
-    # Live trading
-    manager = OrderBookManager()
-    manager.subscribe("BTC/USDT", callback)
-    
-    # Backtesting
-    manager = OrderBookManager(backtest_mode=True)
-    manager.load_backtest_candles("BTC/USDT", candles)
-    snapshot = manager.get_backtest_snapshot("BTC/USDT", timestamp)
+This module serves as the Strategy Engine Input Layer:
+- Live Mode: Binance WS → BinanceMultiStream → OrderBookSnapshot → OrderBookAnalyzer → Strategy
+- Backtest Mode: Candles/Ticks → SyntheticOrderBook → OrderBookAnalyzer → Strategy
 
 Author: Oracle Trading System
 Version: 4.2
@@ -103,7 +50,6 @@ from typing import (
     Union,
 )
 
-# Suppress resource warnings during shutdown
 warnings.filterwarnings("ignore", category=ResourceWarning)
 
 
@@ -150,19 +96,10 @@ logging.getLogger('websockets').setLevel(logging.WARNING)
 # TYPE ALIASES
 # ============================================================
 
-# Price and size tuple for order book levels
 PriceSize = Tuple[float, float]
-
-# Tick data: (timestamp_ms, price) - for price stream without size
 TickData = Tuple[int, float]
-
-# Full trade data: (timestamp_ms, price, size) - for complete trade records
 TradeData = Tuple[int, float, float]
-
-# Simple trade: (price, size) - for quick processing without timestamp
 SimpleTrade = Tuple[float, float]
-
-# Callback type for order book updates
 Callback = Callable[['OrderBookSnapshot'], None]
 
 
@@ -178,7 +115,6 @@ def _now_ms() -> int:
 class OrderBookConstants:
     """All configuration constants in one place."""
 
-    # Synthetic Order Book Generation
     DEFAULT_SPREAD_BPS: Final[float] = 5.0
     MIN_SPREAD_BPS: Final[float] = 2.0
     MAX_SPREAD_MULT: Final[float] = 3.0
@@ -187,31 +123,26 @@ class OrderBookConstants:
     DEFAULT_SIZE_DECAY: Final[float] = 0.7
     DEFAULT_LEVELS: Final[int] = 10
 
-    # Signal Generation Weights
     SIGNAL_IMBALANCE_WEIGHT: Final[float] = 0.4
     SIGNAL_DEPTH_WEIGHT: Final[float] = 0.4
     SIGNAL_TREND_WEIGHT: Final[float] = 0.2
     SIGNAL_TREND_SCALE: Final[float] = 10.0
 
-    # WebSocket Configuration
     WS_PING_INTERVAL: Final[int] = 20
     WS_PING_TIMEOUT: Final[int] = 10
     WS_CLOSE_TIMEOUT: Final[int] = 5
     WS_RECV_TIMEOUT: Final[int] = 30
-    WS_MAX_MESSAGE_SIZE: Final[int] = 10 * 1024 * 1024  # 10MB
+    WS_MAX_MESSAGE_SIZE: Final[int] = 10 * 1024 * 1024
 
-    # Reconnection Settings
     MAX_RECONNECT_ATTEMPTS: Final[int] = 10
     INITIAL_BACKOFF: Final[float] = 1.0
     MAX_BACKOFF: Final[float] = 60.0
     SHUTDOWN_TIMEOUT: Final[float] = 3.0
 
-    # History Storage
     HISTORY_FLUSH_SIZE: Final[int] = 1000
     MAX_SNAPSHOTS_DEFAULT: Final[int] = 100
     MAX_FLUSH_THREADS: Final[int] = 4
 
-    # Health & Validation
     STALE_DATA_MS: Final[int] = 5000
     MAX_SPREAD_BPS_ALERT: Final[float] = 500.0
     MAX_PRICE_SPIKE_PCT: Final[float] = 5.0
@@ -221,19 +152,16 @@ class OrderBookConstants:
     MAX_THROTTLE_KEYS: Final[int] = 10000
     MAX_VALIDATION_FAILURES: Final[int] = 100
 
-    # Connection Limits
     MAX_URL_LENGTH: Final[int] = 2000
     CCXT_MIN_WATCH_INTERVAL: Final[float] = 0.05
     CONNECTION_CHECK_INTERVAL: Final[float] = 1.0
 
-    # Symbol Validation Pattern (uppercase with slash separator)
     SYMBOL_PATTERN: Final[re.Pattern] = re.compile(r'^[A-Z0-9]+/[A-Z0-9]+$')
 
-    # Execution Simulation Defaults
-    DEFAULT_FEE_BPS: Final[float] = 4.0  # 0.04% taker fee
+    DEFAULT_FEE_BPS: Final[float] = 4.0
     DEFAULT_SLIPPAGE_BPS: Final[float] = 2.0
-    LARGE_TRADE_THRESHOLD: Final[float] = 1.0  # BTC equivalent
-    DEFAULT_LIQUIDITY_PENALTY_PCT: Final[float] = 2.0  # For insufficient liquidity
+    LARGE_TRADE_THRESHOLD: Final[float] = 1.0
+    DEFAULT_LIQUIDITY_PENALTY_PCT: Final[float] = 2.0
 
 
 class TradeSide(Enum):
@@ -256,31 +184,7 @@ class AlertLevel(Enum):
 
 @dataclass
 class StreamHealth:
-    # ... existing fields ...
-
-    @property
-    def is_healthy(self) -> bool:
-        """
-        Check if stream is in healthy state.
-        
-        Healthy means:
-        - Connected
-        - Recent data (< 10 seconds old)
-        - Low latency (< 1 second)
-        - Few errors (< 10)
-        """
-        # Add grace period for new connections
-        if self.last_update_ms == 0:
-            # No data yet - give it time before marking unhealthy
-            return self.connected and self.error_count < 10
-        
-        return (
-            self.connected
-            and self.age_ms < 10000
-            and self.latency_ms < 1000
-            and self.error_count < 10
-        )
-        
+    """Health metrics for a stream connection."""
     connected: bool = False
     last_update_ms: int = 0
     updates_per_second: float = 0.0
@@ -299,15 +203,9 @@ class StreamHealth:
 
     @property
     def is_healthy(self) -> bool:
-        """
-        Check if stream is in healthy state.
-        
-        Healthy means:
-        - Connected
-        - Recent data (< 10 seconds old)
-        - Low latency (< 1 second)
-        - Few errors (< 10)
-        """
+        """Check if stream is in healthy state."""
+        if self.last_update_ms == 0:
+            return self.connected and self.error_count < 10
         return (
             self.connected
             and self.age_ms < 10000
@@ -318,7 +216,7 @@ class StreamHealth:
     def record_error(self, error: str) -> None:
         """Record an error occurrence."""
         self.error_count += 1
-        self.last_error = str(error)[:200]  # Truncate long errors
+        self.last_error = str(error)[:200]
 
     def record_reconnect(self) -> None:
         """Record a reconnection attempt."""
@@ -350,22 +248,12 @@ class StreamHealth:
 
 @dataclass(slots=True)
 class OrderBookLevel:
-    """
-    A single price level in the order book.
-    
-    Represents a price point with available size (liquidity).
-    Uses slots for memory efficiency.
-    
-    Attributes:
-        price: The price at this level (must be positive)
-        size: The available size/quantity (must be non-negative)
-    """
+    """A single price level in the order book."""
     price: float
     size: float
 
     def __post_init__(self) -> None:
         """Validate and convert types after initialization."""
-        # Convert to float (handles string inputs from APIs)
         try:
             self.price = float(self.price)
             self.size = float(self.size)
@@ -374,7 +262,6 @@ class OrderBookLevel:
                 f"Invalid level: price={self.price}, size={self.size}"
             ) from e
 
-        # Validate values
         if self.price <= 0:
             raise ValueError(f"Price must be positive: {self.price}")
         if self.size < 0:
@@ -394,31 +281,12 @@ class OrderBookLevel:
 
 
 # ============================================================
-# ♦️ORDER BOOK SNAPSHOT
+# ORDER BOOK SNAPSHOT
 # ============================================================
+
 @dataclass(slots=True)
 class OrderBookSnapshot:
-    """
-    Immutable snapshot of an order book at a point in time.
-    
-    Provides comprehensive order book metrics including:
-    - Basic: mid price, spread, best bid/ask
-    - Imbalance: top-of-book and multi-level
-    - Advanced pricing: VWAP, microprice, weighted mid
-    - Liquidity: depth, market impact, wall detection
-    
-    Use from_raw() for unsorted data (automatic sorting).
-    Use from_sorted() for pre-sorted data (faster, no validation).
-    Use from_binance_fast() for Binance streams (fastest, trusted data).
-    
-    Attributes:
-        symbol: Trading pair symbol (e.g., "BTC/USDT")
-        timestamp: Snapshot timestamp in milliseconds
-        bids: List of bid levels, sorted high to low
-        asks: List of ask levels, sorted low to high
-        sequence: Exchange sequence number for gap detection
-        exchange: Exchange identifier
-    """
+    """Immutable snapshot of an order book at a point in time."""
     symbol: str
     timestamp: int
     bids: List[OrderBookLevel]
@@ -430,26 +298,20 @@ class OrderBookSnapshot:
     def __post_init__(self) -> None:
         """Sort and filter levels if needed."""
         if not self._sorted:
-            # Filter zero-size levels and sort
             self.bids = sorted(
                 (b for b in (self.bids or []) if b.size > 0),
                 key=lambda x: x.price,
-                reverse=True  # Highest bid first
+                reverse=True
             )
             self.asks = sorted(
                 (a for a in (self.asks or []) if a.size > 0),
-                key=lambda x: x.price  # Lowest ask first
+                key=lambda x: x.price
             )
             self._sorted = True
 
     @staticmethod
     def _parse_levels(raw: Optional[List[PriceSize]]) -> List[OrderBookLevel]:
-        """
-        Parse raw price/size tuples into OrderBookLevel objects.
-        
-        Handles various input formats from different exchanges.
-        Silently skips invalid entries.
-        """
+        """Parse raw price/size tuples into OrderBookLevel objects."""
         if not raw:
             return []
 
@@ -462,7 +324,7 @@ class OrderBookSnapshot:
                     if price > 0 and size >= 0:
                         levels.append(OrderBookLevel(price, size))
             except (ValueError, IndexError, TypeError):
-                continue  # Skip invalid entries
+                continue
         return levels
 
     @classmethod
@@ -475,22 +337,7 @@ class OrderBookSnapshot:
         sequence: int = 0,
         exchange: str = ""
     ) -> 'OrderBookSnapshot':
-        """
-        Create snapshot from raw price/size lists.
-        
-        Automatically parses, validates, and sorts the data.
-        
-        Args:
-            symbol: Trading pair symbol
-            bids: List of [price, size] for bids
-            asks: List of [price, size] for asks
-            timestamp: Snapshot timestamp (defaults to now)
-            sequence: Exchange sequence number
-            exchange: Exchange identifier
-            
-        Returns:
-            OrderBookSnapshot instance
-        """
+        """Create snapshot from raw price/size lists."""
         return cls(
             symbol=symbol,
             timestamp=timestamp or _now_ms(),
@@ -498,7 +345,7 @@ class OrderBookSnapshot:
             asks=cls._parse_levels(asks),
             sequence=sequence,
             exchange=exchange,
-            _sorted=False  # Will be sorted in __post_init__
+            _sorted=False
         )
 
     @classmethod
@@ -511,24 +358,7 @@ class OrderBookSnapshot:
         sequence: int = 0,
         exchange: str = ""
     ) -> 'OrderBookSnapshot':
-        """
-        Create snapshot from pre-sorted OrderBookLevel lists.
-        
-        Faster than from_raw() as it skips parsing and sorting.
-        Caller must ensure data is already sorted correctly.
-        
-        Args:
-            symbol: Trading pair symbol
-            bids: Pre-sorted bid levels (high to low)
-            asks: Pre-sorted ask levels (low to high)
-            timestamp: Snapshot timestamp (defaults to now)
-            sequence: Exchange sequence number
-            exchange: Exchange identifier
-            
-        Returns:
-            OrderBookSnapshot instance
-        """
-        # Bypass __post_init__ sorting by creating instance directly
+        """Create snapshot from pre-sorted OrderBookLevel lists."""
         snapshot = object.__new__(cls)
         snapshot.symbol = symbol
         snapshot.timestamp = timestamp or _now_ms()
@@ -548,49 +378,25 @@ class OrderBookSnapshot:
         timestamp: int,
         sequence: int = 0
     ) -> 'OrderBookSnapshot':
-        """
-        Ultra-fast path for Binance depth streams.
-        
-        Optimized for Binance's guaranteed data format:
-        - Pre-sorted (bids descending, asks ascending)
-        - String price/size pairs
-        - Max 20 levels for depth20 streams
-        
-        Skips ALL validation for maximum speed.
-        Only use with trusted Binance WebSocket data.
-        
-        Args:
-            symbol: Trading pair symbol
-            bids: Binance bid data [[price_str, size_str], ...]
-            asks: Binance ask data [[price_str, size_str], ...]
-            timestamp: Event timestamp from Binance
-            sequence: lastUpdateId from Binance
-            
-        Returns:
-            OrderBookSnapshot instance
-        """
-        # Limit to 20 levels (Binance depth20 guarantee)
+        """Ultra-fast path for Binance depth streams."""
         n_bids = min(20, len(bids))
         n_asks = min(20, len(asks))
-        
-        # Pre-allocate lists with exact size
-        parsed_bids: List[OrderBookLevel] = [None] * n_bids  # type: ignore
-        parsed_asks: List[OrderBookLevel] = [None] * n_asks  # type: ignore
-        
-        # Direct object creation bypassing __init__ and __post_init__
+
+        parsed_bids: List[OrderBookLevel] = [None] * n_bids
+        parsed_asks: List[OrderBookLevel] = [None] * n_asks
+
         for i in range(n_bids):
             level = object.__new__(OrderBookLevel)
             level.price = float(bids[i][0])
             level.size = float(bids[i][1])
             parsed_bids[i] = level
-        
+
         for i in range(n_asks):
             level = object.__new__(OrderBookLevel)
             level.price = float(asks[i][0])
             level.size = float(asks[i][1])
             parsed_asks[i] = level
-        
-        # Create snapshot bypassing __post_init__
+
         snapshot = object.__new__(cls)
         snapshot.symbol = symbol
         snapshot.timestamp = timestamp
@@ -599,12 +405,8 @@ class OrderBookSnapshot:
         snapshot.sequence = sequence
         snapshot.exchange = "binance"
         snapshot._sorted = True
-        
-        return snapshot
 
-    # ─────────────────────────────────────────────────────────
-    # VALIDATION PROPERTIES
-    # ─────────────────────────────────────────────────────────
+        return snapshot
 
     @property
     def is_valid(self) -> bool:
@@ -618,11 +420,7 @@ class OrderBookSnapshot:
 
     @property
     def is_crossed(self) -> bool:
-        """
-        Check if best bid >= best ask (invalid state).
-        
-        A crossed book indicates a data error or arbitrage opportunity.
-        """
+        """Check if best bid >= best ask (invalid state)."""
         return self.is_valid and self.bids[0].price >= self.asks[0].price
 
     def age_ms(self) -> int:
@@ -633,10 +431,6 @@ class OrderBookSnapshot:
         """Check if data is too old for trading."""
         return self.age_ms() > max_age_ms
 
-    # ─────────────────────────────────────────────────────────
-    # BASIC METRICS
-    # ─────────────────────────────────────────────────────────
-
     @property
     def best_bid(self) -> float:
         """Highest bid price (best price to sell at)."""
@@ -684,33 +478,16 @@ class OrderBookSnapshot:
         """Spread in basis points (1 bp = 0.01%)."""
         return self.spread_pct * 100
 
-    # ─────────────────────────────────────────────────────────
-    # IMBALANCE METRICS
-    # ─────────────────────────────────────────────────────────
-
     @property
     def imbalance(self) -> float:
-        """
-        Top-of-book imbalance based on size at best bid/ask.
-        
-        Returns:
-            -1.0 (all asks, bearish) to +1.0 (all bids, bullish)
-        """
+        """Top-of-book imbalance based on size at best bid/ask."""
         total = self.best_bid_size + self.best_ask_size
         if total == 0:
             return 0.0
         return (self.best_bid_size - self.best_ask_size) / total
 
     def depth_imbalance(self, levels: int = 10) -> float:
-        """
-        Multi-level volume imbalance.
-        
-        Args:
-            levels: Number of levels to consider
-            
-        Returns:
-            -1.0 (ask heavy, bearish) to +1.0 (bid heavy, bullish)
-        """
+        """Multi-level volume imbalance."""
         bid_vol = sum(b.size for b in self.bids[:levels])
         ask_vol = sum(a.size for a in self.asks[:levels])
         total = bid_vol + ask_vol
@@ -719,27 +496,13 @@ class OrderBookSnapshot:
         return (bid_vol - ask_vol) / total
 
     def value_imbalance(self, levels: int = 10) -> float:
-        """
-        Multi-level notional value imbalance.
-        
-        Weights by price × size instead of just size.
-        
-        Args:
-            levels: Number of levels to consider
-            
-        Returns:
-            -1.0 (ask heavy) to +1.0 (bid heavy)
-        """
+        """Multi-level notional value imbalance."""
         bid_val = sum(b.value for b in self.bids[:levels])
         ask_val = sum(a.value for a in self.asks[:levels])
         total = bid_val + ask_val
         if total == 0:
             return 0.0
         return (bid_val - ask_val) / total
-
-    # ─────────────────────────────────────────────────────────
-    # VOLUME & VALUE
-    # ─────────────────────────────────────────────────────────
 
     def total_bid_volume(self, levels: int = 10) -> float:
         """Total bid volume across specified levels."""
@@ -757,20 +520,8 @@ class OrderBookSnapshot:
         """Total ask notional value across specified levels."""
         return sum(a.value for a in self.asks[:levels])
 
-    # ─────────────────────────────────────────────────────────
-    # ADVANCED PRICING
-    # ─────────────────────────────────────────────────────────
-
     def vwap_bid(self, levels: int = 5) -> float:
-        """
-        Volume-weighted average bid price.
-        
-        Args:
-            levels: Number of levels to include
-            
-        Returns:
-            VWAP of bid side
-        """
+        """Volume-weighted average bid price."""
         bids = self.bids[:levels]
         if not bids:
             return 0.0
@@ -780,15 +531,7 @@ class OrderBookSnapshot:
         return sum(b.price * b.size for b in bids) / total_size
 
     def vwap_ask(self, levels: int = 5) -> float:
-        """
-        Volume-weighted average ask price.
-        
-        Args:
-            levels: Number of levels to include
-            
-        Returns:
-            VWAP of ask side
-        """
+        """Volume-weighted average ask price."""
         asks = self.asks[:levels]
         if not asks:
             return 0.0
@@ -798,18 +541,7 @@ class OrderBookSnapshot:
         return sum(a.price * a.size for a in asks) / total_size
 
     def weighted_mid_price(self, levels: int = 5) -> float:
-        """
-        Volume-weighted mid price.
-        
-        Weights each side's VWAP by the opposite side's volume,
-        giving more weight to the side with less liquidity.
-        
-        Args:
-            levels: Number of levels to include
-            
-        Returns:
-            Weighted mid price
-        """
+        """Volume-weighted mid price."""
         if not self.is_valid:
             return 0.0
         bid_vol = self.total_bid_volume(levels)
@@ -823,29 +555,16 @@ class OrderBookSnapshot:
         ) / total
 
     def microprice(self) -> float:
-        """
-        Size-weighted mid price (microstructure fair price).
-        
-        Skews toward the side with less liquidity, as that side
-        is more likely to move. Used in HFT for fair value estimation.
-        
-        Returns:
-            Microprice estimate
-        """
+        """Size-weighted mid price (microstructure fair price)."""
         if not self.is_valid:
             return 0.0
         total = self.best_bid_size + self.best_ask_size
         if total == 0:
             return self.mid_price
-        # Weight bid by ask size and vice versa
         return (
             self.best_bid * self.best_ask_size +
             self.best_ask * self.best_bid_size
         ) / total
-
-    # ─────────────────────────────────────────────────────────
-    # WALL DETECTION
-    # ─────────────────────────────────────────────────────────
 
     def find_walls(
         self,
@@ -853,19 +572,7 @@ class OrderBookSnapshot:
         levels: int = 20,
         min_size: float = 0.0
     ) -> Dict[str, List[OrderBookLevel]]:
-        """
-        Find significant order walls (large resting orders).
-        
-        Walls can act as support (bid walls) or resistance (ask walls).
-        
-        Args:
-            threshold_mult: Multiplier over average size to qualify as wall
-            levels: Number of levels to scan
-            min_size: Minimum absolute size to qualify
-            
-        Returns:
-            Dict with 'bid_walls' and 'ask_walls' lists
-        """
+        """Find significant order walls (large resting orders)."""
         result: Dict[str, List[OrderBookLevel]] = {
             "bid_walls": [],
             "ask_walls": []
@@ -875,13 +582,11 @@ class OrderBookSnapshot:
         bids = self.bids[:max_levels]
         asks = self.asks[:max_levels]
 
-        # Find bid walls (support)
         if len(bids) >= 3:
             avg_size = sum(b.size for b in bids) / len(bids)
             threshold = max(avg_size * threshold_mult, min_size)
             result["bid_walls"] = [b for b in bids if b.size >= threshold]
 
-        # Find ask walls (resistance)
         if len(asks) >= 3:
             avg_size = sum(a.size for a in asks) / len(asks)
             threshold = max(avg_size * threshold_mult, min_size)
@@ -905,25 +610,12 @@ class OrderBookSnapshot:
         walls = self.find_walls(threshold_mult)
         return walls["ask_walls"][0] if walls["ask_walls"] else None
 
-    # ─────────────────────────────────────────────────────────
-    # LIQUIDITY ANALYSIS
-    # ─────────────────────────────────────────────────────────
-
     def liquidity_at_price(
         self,
         price: float,
         tolerance_pct: float = 0.1
     ) -> Tuple[float, float]:
-        """
-        Find liquidity around a specific price.
-        
-        Args:
-            price: Target price
-            tolerance_pct: Price tolerance as percentage
-            
-        Returns:
-            Tuple of (bid_liquidity, ask_liquidity)
-        """
+        """Find liquidity around a specific price."""
         if price <= 0:
             return 0.0, 0.0
 
@@ -939,15 +631,7 @@ class OrderBookSnapshot:
         return bid_liq, ask_liq
 
     def depth_at_distance(self, pct_from_mid: float = 1.0) -> Tuple[float, float]:
-        """
-        Get depth within percentage distance from mid price.
-        
-        Args:
-            pct_from_mid: Percentage distance from mid price
-            
-        Returns:
-            Tuple of (bid_depth, ask_depth)
-        """
+        """Get depth within percentage distance from mid price."""
         mid = self.mid_price
         if mid <= 0:
             return 0.0, 0.0
@@ -963,20 +647,7 @@ class OrderBookSnapshot:
         side: str = "buy",
         insufficient_liquidity_penalty_pct: float = OrderBookConstants.DEFAULT_LIQUIDITY_PENALTY_PCT
     ) -> float:
-        """
-        Estimate average fill price for a market order.
-        
-        Walks the order book to simulate execution and calculates
-        the volume-weighted average price.
-        
-        Args:
-            size: Order size to fill
-            side: 'buy' or 'sell'
-            insufficient_liquidity_penalty_pct: Penalty for unfilled portion
-            
-        Returns:
-            Estimated average execution price
-        """
+        """Estimate average fill price for a market order."""
         if size <= 0:
             return self.mid_price
 
@@ -984,7 +655,6 @@ class OrderBookSnapshot:
         total_cost = 0.0
         levels = self.asks if side == "buy" else self.bids
 
-        # Walk through levels
         for level in levels:
             if remaining <= 0:
                 break
@@ -992,10 +662,8 @@ class OrderBookSnapshot:
             total_cost += fill * level.price
             remaining -= fill
 
-        # Handle insufficient liquidity
         if remaining > 0:
             if levels:
-                # Extrapolate with penalty
                 penalty_mult = insufficient_liquidity_penalty_pct / 100
                 if side == "buy":
                     penalty_price = levels[-1].price * (1 + penalty_mult)
@@ -1010,425 +678,6 @@ class OrderBookSnapshot:
                 return self.mid_price
 
         return total_cost / size if size > 0 else self.mid_price
-
-    # ─────────────────────────────────────────────────────────
-    # SERIALIZATION
-    # ─────────────────────────────────────────────────────────
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Export snapshot as dictionary for serialization."""
-        return {
-            "symbol": self.symbol,
-            "timestamp": self.timestamp,
-            "bids": [b.to_tuple() for b in self.bids[:50]],
-            "asks": [a.to_tuple() for a in self.asks[:50]],
-            "sequence": self.sequence,
-            "exchange": self.exchange,
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'OrderBookSnapshot':
-        """Create snapshot from dictionary."""
-        return cls.from_raw(
-            symbol=data.get("symbol", "UNKNOWN"),
-            bids=data.get("bids", []),
-            asks=data.get("asks", []),
-            timestamp=data.get("timestamp"),
-            sequence=data.get("sequence", 0),
-            exchange=data.get("exchange", ""),
-        )
-
-    def __repr__(self) -> str:
-        if not self.is_valid:
-            return f"OrderBook({self.symbol} @ {self.timestamp} | INVALID)"
-        return (
-            f"OrderBook({self.symbol} @ {self.timestamp} | "
-            f"bid={self.best_bid:.4f} ask={self.best_ask:.4f} "
-            f"spread={self.spread_bps:.2f}bps imb={self.imbalance:+.2f})"
-        )
-
-
-# ─────────────────────────────────────────────────────────
-#♦️ BASIC METRICS
-# ─────────────────────────────────────────────────────────
-
-    @property
-    def best_bid(self) -> float:
-        """Highest bid price (best price to sell at)."""
-        return self.bids[0].price if self.bids else 0.0
-
-    @property
-    def best_ask(self) -> float:
-        """Lowest ask price (best price to buy at)."""
-        return self.asks[0].price if self.asks else 0.0
-
-    @property
-    def best_bid_size(self) -> float:
-        """Size available at best bid."""
-        return self.bids[0].size if self.bids else 0.0
-
-    @property
-    def best_ask_size(self) -> float:
-        """Size available at best ask."""
-        return self.asks[0].size if self.asks else 0.0
-
-    @property
-    def mid_price(self) -> float:
-        """Mid-market price: (best_bid + best_ask) / 2."""
-        if not self.is_valid:
-            return 0.0
-        return (self.bids[0].price + self.asks[0].price) / 2
-
-    @property
-    def spread(self) -> float:
-        """Absolute spread: best_ask - best_bid."""
-        if not self.is_valid:
-            return 0.0
-        return self.asks[0].price - self.bids[0].price
-
-    @property
-    def spread_pct(self) -> float:
-        """Spread as percentage of mid price."""
-        mid = self.mid_price
-        if mid <= 0:
-            return 0.0
-        return (self.spread / mid) * 100
-
-    @property
-    def spread_bps(self) -> float:
-        """Spread in basis points (1 bp = 0.01%)."""
-        return self.spread_pct * 100
-
-    # ─────────────────────────────────────────────────────────
-    # IMBALANCE METRICS
-    # ─────────────────────────────────────────────────────────
-
-    @property
-    def imbalance(self) -> float:
-        """
-        Top-of-book imbalance based on size at best bid/ask.
-        
-        Returns:
-            -1.0 (all asks, bearish) to +1.0 (all bids, bullish)
-        """
-        total = self.best_bid_size + self.best_ask_size
-        if total == 0:
-            return 0.0
-        return (self.best_bid_size - self.best_ask_size) / total
-
-    def depth_imbalance(self, levels: int = 10) -> float:
-        """
-        Multi-level volume imbalance.
-        
-        Args:
-            levels: Number of levels to consider
-            
-        Returns:
-            -1.0 (ask heavy, bearish) to +1.0 (bid heavy, bullish)
-        """
-        bid_vol = sum(b.size for b in self.bids[:levels])
-        ask_vol = sum(a.size for a in self.asks[:levels])
-        total = bid_vol + ask_vol
-        if total == 0:
-            return 0.0
-        return (bid_vol - ask_vol) / total
-
-    def value_imbalance(self, levels: int = 10) -> float:
-        """
-        Multi-level notional value imbalance.
-        
-        Weights by price × size instead of just size.
-        
-        Args:
-            levels: Number of levels to consider
-            
-        Returns:
-            -1.0 (ask heavy) to +1.0 (bid heavy)
-        """
-        bid_val = sum(b.value for b in self.bids[:levels])
-        ask_val = sum(a.value for a in self.asks[:levels])
-        total = bid_val + ask_val
-        if total == 0:
-            return 0.0
-        return (bid_val - ask_val) / total
-
-    # ─────────────────────────────────────────────────────────
-    # VOLUME & VALUE
-    # ─────────────────────────────────────────────────────────
-
-    def total_bid_volume(self, levels: int = 10) -> float:
-        """Total bid volume across specified levels."""
-        return sum(b.size for b in self.bids[:levels])
-
-    def total_ask_volume(self, levels: int = 10) -> float:
-        """Total ask volume across specified levels."""
-        return sum(a.size for a in self.asks[:levels])
-
-    def total_bid_value(self, levels: int = 10) -> float:
-        """Total bid notional value across specified levels."""
-        return sum(b.value for b in self.bids[:levels])
-
-    def total_ask_value(self, levels: int = 10) -> float:
-        """Total ask notional value across specified levels."""
-        return sum(a.value for a in self.asks[:levels])
-
-    # ─────────────────────────────────────────────────────────
-    # ADVANCED PRICING
-    # ─────────────────────────────────────────────────────────
-
-    def vwap_bid(self, levels: int = 5) -> float:
-        """
-        Volume-weighted average bid price.
-        
-        Args:
-            levels: Number of levels to include
-            
-        Returns:
-            VWAP of bid side
-        """
-        bids = self.bids[:levels]
-        if not bids:
-            return 0.0
-        total_size = sum(b.size for b in bids)
-        if total_size == 0:
-            return self.best_bid
-        return sum(b.price * b.size for b in bids) / total_size
-
-    def vwap_ask(self, levels: int = 5) -> float:
-        """
-        Volume-weighted average ask price.
-        
-        Args:
-            levels: Number of levels to include
-            
-        Returns:
-            VWAP of ask side
-        """
-        asks = self.asks[:levels]
-        if not asks:
-            return 0.0
-        total_size = sum(a.size for a in asks)
-        if total_size == 0:
-            return self.best_ask
-        return sum(a.price * a.size for a in asks) / total_size
-
-    def weighted_mid_price(self, levels: int = 5) -> float:
-        """
-        Volume-weighted mid price.
-        
-        Weights each side's VWAP by the opposite side's volume,
-        giving more weight to the side with less liquidity.
-        
-        Args:
-            levels: Number of levels to include
-            
-        Returns:
-            Weighted mid price
-        """
-        if not self.is_valid:
-            return 0.0
-        bid_vol = self.total_bid_volume(levels)
-        ask_vol = self.total_ask_volume(levels)
-        total = bid_vol + ask_vol
-        if total == 0:
-            return self.mid_price
-        return (
-            self.vwap_bid(levels) * ask_vol +
-            self.vwap_ask(levels) * bid_vol
-        ) / total
-
-    def microprice(self) -> float:
-        """
-        Size-weighted mid price (microstructure fair price).
-        
-        Skews toward the side with less liquidity, as that side
-        is more likely to move. Used in HFT for fair value estimation.
-        
-        Returns:
-            Microprice estimate
-        """
-        if not self.is_valid:
-            return 0.0
-        total = self.best_bid_size + self.best_ask_size
-        if total == 0:
-            return self.mid_price
-        # Weight bid by ask size and vice versa
-        return (
-            self.best_bid * self.best_ask_size +
-            self.best_ask * self.best_bid_size
-        ) / total
-
-    # ─────────────────────────────────────────────────────────
-    # WALL DETECTION
-    # ─────────────────────────────────────────────────────────
-
-    def find_walls(
-        self,
-        threshold_mult: float = 3.0,
-        levels: int = 20,
-        min_size: float = 0.0
-    ) -> Dict[str, List[OrderBookLevel]]:
-        """
-        Find significant order walls (large resting orders).
-        
-        Walls can act as support (bid walls) or resistance (ask walls).
-        
-        Args:
-            threshold_mult: Multiplier over average size to qualify as wall
-            levels: Number of levels to scan
-            min_size: Minimum absolute size to qualify
-            
-        Returns:
-            Dict with 'bid_walls' and 'ask_walls' lists
-        """
-        result: Dict[str, List[OrderBookLevel]] = {
-            "bid_walls": [],
-            "ask_walls": []
-        }
-        max_levels = min(levels, 20)
-
-        bids = self.bids[:max_levels]
-        asks = self.asks[:max_levels]
-
-        # Find bid walls (support)
-        if len(bids) >= 3:
-            avg_size = sum(b.size for b in bids) / len(bids)
-            threshold = max(avg_size * threshold_mult, min_size)
-            result["bid_walls"] = [b for b in bids if b.size >= threshold]
-
-        # Find ask walls (resistance)
-        if len(asks) >= 3:
-            avg_size = sum(a.size for a in asks) / len(asks)
-            threshold = max(avg_size * threshold_mult, min_size)
-            result["ask_walls"] = [a for a in asks if a.size >= threshold]
-
-        return result
-
-    def nearest_bid_wall(
-        self,
-        threshold_mult: float = 3.0
-    ) -> Optional[OrderBookLevel]:
-        """Find nearest significant bid wall (support level)."""
-        walls = self.find_walls(threshold_mult)
-        return walls["bid_walls"][0] if walls["bid_walls"] else None
-
-    def nearest_ask_wall(
-        self,
-        threshold_mult: float = 3.0
-    ) -> Optional[OrderBookLevel]:
-        """Find nearest significant ask wall (resistance level)."""
-        walls = self.find_walls(threshold_mult)
-        return walls["ask_walls"][0] if walls["ask_walls"] else None
-
-    # ─────────────────────────────────────────────────────────
-    # LIQUIDITY ANALYSIS
-    # ─────────────────────────────────────────────────────────
-
-    def liquidity_at_price(
-        self,
-        price: float,
-        tolerance_pct: float = 0.1
-    ) -> Tuple[float, float]:
-        """
-        Find liquidity around a specific price.
-        
-        Args:
-            price: Target price
-            tolerance_pct: Price tolerance as percentage
-            
-        Returns:
-            Tuple of (bid_liquidity, ask_liquidity)
-        """
-        if price <= 0:
-            return 0.0, 0.0
-
-        tol = price * (tolerance_pct / 100)
-        bid_liq = sum(
-            b.size for b in self.bids
-            if price - tol <= b.price <= price + tol
-        )
-        ask_liq = sum(
-            a.size for a in self.asks
-            if price - tol <= a.price <= price + tol
-        )
-        return bid_liq, ask_liq
-
-    def depth_at_distance(self, pct_from_mid: float = 1.0) -> Tuple[float, float]:
-        """
-        Get depth within percentage distance from mid price.
-        
-        Args:
-            pct_from_mid: Percentage distance from mid price
-            
-        Returns:
-            Tuple of (bid_depth, ask_depth)
-        """
-        mid = self.mid_price
-        if mid <= 0:
-            return 0.0, 0.0
-
-        dist = mid * (pct_from_mid / 100)
-        bid_depth = sum(b.size for b in self.bids if b.price >= mid - dist)
-        ask_depth = sum(a.size for a in self.asks if a.price <= mid + dist)
-        return bid_depth, ask_depth
-
-    def market_impact(
-        self,
-        size: float,
-        side: str = "buy",
-        insufficient_liquidity_penalty_pct: float = OrderBookConstants.DEFAULT_LIQUIDITY_PENALTY_PCT
-    ) -> float:
-        """
-        Estimate average fill price for a market order.
-        
-        Walks the order book to simulate execution and calculates
-        the volume-weighted average price.
-        
-        Args:
-            size: Order size to fill
-            side: 'buy' or 'sell'
-            insufficient_liquidity_penalty_pct: Penalty for unfilled portion
-            
-        Returns:
-            Estimated average execution price
-        """
-        if size <= 0:
-            return self.mid_price
-
-        remaining = size
-        total_cost = 0.0
-        levels = self.asks if side == "buy" else self.bids
-
-        # Walk through levels
-        for level in levels:
-            if remaining <= 0:
-                break
-            fill = min(remaining, level.size)
-            total_cost += fill * level.price
-            remaining -= fill
-
-        # Handle insufficient liquidity
-        if remaining > 0:
-            if levels:
-                # Extrapolate with penalty
-                penalty_mult = insufficient_liquidity_penalty_pct / 100
-                if side == "buy":
-                    penalty_price = levels[-1].price * (1 + penalty_mult)
-                else:
-                    penalty_price = levels[-1].price * (1 - penalty_mult)
-                total_cost += remaining * penalty_price
-                logger.debug(
-                    f"Insufficient liquidity: {remaining/size*100:.1f}% unfilled, "
-                    f"extrapolating with {penalty_mult*100:+.1f}% penalty"
-                )
-            else:
-                return self.mid_price
-
-        return total_cost / size if size > 0 else self.mid_price
-
-    # ─────────────────────────────────────────────────────────
-    # SERIALIZATION
-    # ─────────────────────────────────────────────────────────
 
     def to_dict(self) -> Dict[str, Any]:
         """Export snapshot as dictionary for serialization."""
@@ -1468,18 +717,7 @@ class OrderBookSnapshot:
 # ============================================================
 
 class DataValidator:
-    """
-    Validates order book data for anomalies.
-    
-    Detects:
-    - Crossed order books (bid >= ask)
-    - Extreme spreads
-    - Price spikes (sudden large moves)
-    - Stale data
-    - Extreme imbalances
-    
-    Uses LRU-style cleanup to limit memory usage.
-    """
+    """Validates order book data for anomalies."""
 
     def __init__(
         self,
@@ -1488,15 +726,7 @@ class DataValidator:
         history_size: int = 100,
         max_symbols: int = 500
     ):
-        """
-        Initialize validator.
-        
-        Args:
-            max_spread_bps: Maximum acceptable spread in basis points
-            max_price_spike_pct: Maximum acceptable price change percentage
-            history_size: Price history size per symbol
-            max_symbols: Maximum symbols to track (LRU eviction)
-        """
+        """Initialize validator."""
         self.max_spread_bps = max_spread_bps
         self.max_price_spike_pct = max_price_spike_pct
         self._history_size = history_size
@@ -1510,7 +740,6 @@ class DataValidator:
         if len(self._price_history) <= int(self._max_symbols * 0.9):
             return
 
-        # Sort by last access time, keep most recent
         sorted_symbols = sorted(
             self._last_access.items(),
             key=lambda x: x[1],
@@ -1518,48 +747,32 @@ class DataValidator:
         )
         keep = {s for s, _ in sorted_symbols[:self._max_symbols - 1]}
 
-        # Remove old symbols
         for symbol in set(self._price_history.keys()) - keep:
             self._price_history.pop(symbol, None)
             self._last_access.pop(symbol, None)
 
     def validate(self, snapshot: OrderBookSnapshot) -> Tuple[bool, List[str]]:
-        """
-        Validate a snapshot for anomalies.
-        
-        Args:
-            snapshot: OrderBookSnapshot to validate
-            
-        Returns:
-            Tuple of (is_valid, list_of_warnings)
-            is_valid is False only for critical issues (crossed book, price spike)
-        """
+        """Validate a snapshot for anomalies."""
         warnings: List[str] = []
         is_critical = False
 
-        # Basic validity check
         if not snapshot.is_valid:
             return False, ["Invalid snapshot (missing bids or asks)"]
 
-        # Crossed book check
         if snapshot.is_crossed:
             return False, ["Crossed order book (bid >= ask)"]
 
-        # Spread check
         if snapshot.spread_bps > self.max_spread_bps:
             warnings.append(f"Extreme spread: {snapshot.spread_bps:.2f} bps")
 
-        # Staleness check
         if snapshot.is_stale():
             warnings.append(f"Stale data: {snapshot.age_ms()}ms old")
 
-        # Price spike detection
         symbol = snapshot.symbol
         mid = snapshot.mid_price
         now = time.time()
 
         with self._lock:
-            # Initialize history for new symbol
             if symbol not in self._price_history:
                 if len(self._price_history) >= self._max_symbols:
                     self._cleanup_old_symbols()
@@ -1568,7 +781,6 @@ class DataValidator:
             self._last_access[symbol] = now
             history = self._price_history[symbol]
 
-            # Check for price spike after warmup period
             if len(history) >= 10:
                 avg_price = sum(history) / len(history)
                 if avg_price > 0:
@@ -1579,7 +791,6 @@ class DataValidator:
 
             history.append(mid)
 
-        # Extreme imbalance check
         if abs(snapshot.imbalance) > 0.999:
             warnings.append(f"Extreme imbalance: {snapshot.imbalance:.4f}")
 
@@ -1610,12 +821,7 @@ class DataValidator:
 # ============================================================
 
 class ThrottledCallback:
-    """
-    Rate-limits callback invocations.
-    
-    Ensures callbacks are not called more frequently than specified interval.
-    Stores the most recent pending data for potential flush.
-    """
+    """Rate-limits callback invocations."""
 
     __slots__ = (
         '_callback',
@@ -1630,13 +836,7 @@ class ThrottledCallback:
         callback: Callable[[Any], None],
         min_interval_ms: int = 100
     ):
-        """
-        Initialize throttled callback.
-        
-        Args:
-            callback: Function to call with data
-            min_interval_ms: Minimum interval between calls
-        """
+        """Initialize throttled callback."""
         self._callback = callback
         self._min_interval_ms = min_interval_ms
         self._last_call = 0.0
@@ -1654,7 +854,6 @@ class ThrottledCallback:
                 self._pending = None
                 should_call = True
             else:
-                # Store for potential later flush
                 self._pending = data
 
         if should_call:
@@ -1684,21 +883,10 @@ class ThrottledCallback:
 # ============================================================
 
 class OrderBookDeltaHandler:
-    """
-    Maintains order book state from incremental updates.
-    
-    Useful for exchanges that send deltas (changes) instead of
-    full snapshots. Maintains internal state and rebuilds snapshots.
-    """
+    """Maintains order book state from incremental updates."""
 
     def __init__(self, symbol: str, max_levels: int = 100):
-        """
-        Initialize delta handler.
-        
-        Args:
-            symbol: Trading pair symbol
-            max_levels: Maximum levels to maintain per side
-        """
+        """Initialize delta handler."""
         self.symbol = symbol
         self.max_levels = max_levels
         self._bids: Dict[float, float] = {}
@@ -1711,15 +899,14 @@ class OrderBookDeltaHandler:
         if not self._bids or not self._asks:
             return None
 
-        # Sort and limit levels
         sorted_bids = sorted(
             ((p, s) for p, s in self._bids.items() if s > 0),
-            key=lambda x: -x[0]  # Descending by price
+            key=lambda x: -x[0]
         )[:self.max_levels]
 
         sorted_asks = sorted(
             ((p, s) for p, s in self._asks.items() if s > 0),
-            key=lambda x: x[0]  # Ascending by price
+            key=lambda x: x[0]
         )[:self.max_levels]
 
         return OrderBookSnapshot.from_raw(
@@ -1735,14 +922,7 @@ class OrderBookDeltaHandler:
         asks: List[PriceSize],
         update_id: int
     ) -> None:
-        """
-        Apply a full snapshot (replaces all data).
-        
-        Args:
-            bids: List of [price, size] for bids
-            asks: List of [price, size] for asks
-            update_id: Exchange update ID
-        """
+        """Apply a full snapshot (replaces all data)."""
         with self._lock:
             self._bids.clear()
             self._asks.clear()
@@ -1760,30 +940,17 @@ class OrderBookDeltaHandler:
         asks: List[PriceSize],
         update_id: int
     ) -> Optional[OrderBookSnapshot]:
-        """
-        Apply incremental update and return new snapshot.
-        
-        Args:
-            bids: Bid updates (size=0 means remove)
-            asks: Ask updates (size=0 means remove)
-            update_id: Exchange update ID
-            
-        Returns:
-            New snapshot or None if update is stale
-        """
+        """Apply incremental update and return new snapshot."""
         with self._lock:
-            # Check for stale update
             if update_id <= self._last_update_id:
                 return None
 
-            # Apply bid updates
             for price, size in bids:
                 if size == 0:
                     self._bids.pop(price, None)
                 else:
                     self._bids[price] = size
 
-            # Apply ask updates
             for price, size in asks:
                 if size == 0:
                     self._asks.pop(price, None)
@@ -1811,25 +978,14 @@ class OrderBookDeltaHandler:
 # ============================================================
 
 class AlertManager:
-    """
-    Centralized alert handling with throttling.
-    
-    Prevents alert floods by rate-limiting per throttle_key.
-    Supports multiple handlers for flexible alert routing.
-    """
+    """Centralized alert handling with throttling."""
 
     def __init__(
         self,
         throttle_seconds: int = OrderBookConstants.ALERT_THROTTLE_SECONDS,
         max_throttle_keys: int = OrderBookConstants.MAX_THROTTLE_KEYS
     ):
-        """
-        Initialize alert manager.
-        
-        Args:
-            throttle_seconds: Minimum seconds between same-key alerts
-            max_throttle_keys: Maximum throttle keys to track
-        """
+        """Initialize alert manager."""
         self._handlers: List[Callable[[str, str, Dict[str, Any]], None]] = []
         self._throttle: Dict[str, float] = {}
         self._throttle_seconds = throttle_seconds
@@ -1867,19 +1023,7 @@ class AlertManager:
         context: Optional[Dict[str, Any]] = None,
         throttle_key: Optional[str] = None
     ) -> bool:
-        """
-        Send an alert to all handlers.
-        
-        Args:
-            level: Alert level (INFO, WARNING, CRITICAL)
-            message: Alert message
-            context: Additional context data
-            throttle_key: Key for throttling (None = no throttling)
-            
-        Returns:
-            True if alert was sent, False if throttled
-        """
-        # Check throttle
+        """Send an alert to all handlers."""
         if throttle_key:
             now = time.time()
             with self._lock:
@@ -1889,16 +1033,13 @@ class AlertManager:
                         return False
                 self._throttle[throttle_key] = now
 
-        # Build context
         ctx = context.copy() if context else {}
         ctx["timestamp"] = datetime.now().isoformat()
         ctx["level"] = level
 
-        # Get handlers
         with self._lock:
             handlers = list(self._handlers)
 
-        # Invoke handlers
         for handler in handlers:
             try:
                 handler(level, message, ctx)
@@ -1964,20 +1105,10 @@ def console_alert_handler(
 # ============================================================
 
 class StateManager:
-    """
-    Persistent state management with crash recovery.
-    
-    Saves trading state to JSON for recovery after restarts.
-    Uses atomic writes to prevent corruption.
-    """
+    """Persistent state management with crash recovery."""
 
     def __init__(self, state_file: str = "trading_state.json"):
-        """
-        Initialize state manager.
-        
-        Args:
-            state_file: Path to state file
-        """
+        """Initialize state manager."""
         self.state_file = Path(state_file)
         self._state: Dict[str, Any] = {}
         self._lock = threading.RLock()
@@ -2029,14 +1160,7 @@ class StateManager:
             logger.error(f"Failed to backup corrupted state: {e}")
 
     def save(self) -> bool:
-        """
-        Save state to disk atomically.
-        
-        Uses temp file + rename to prevent corruption.
-        
-        Returns:
-            True if successful, False otherwise
-        """
+        """Save state to disk atomically."""
         with self._lock:
             state_copy = self._state.copy()
 
@@ -2117,49 +1241,31 @@ class StateManager:
 
 
 # ============================================================
-# ♦️ORDER BOOK ANALYZER
+# ORDER BOOK ANALYZER
 # ============================================================
+
 class OrderBookAnalyzer:
-    """
-    Tracks order book evolution over time.
-    
-    Provides:
-    - Trend analysis (imbalance trends, acceleration)
-    - Signal generation (bullish/bearish detection)
-    - Statistics computation with caching
-    - Wall detection near prices
-    """
+    """Tracks order book evolution over time."""
 
     def __init__(
         self,
         max_snapshots: int = OrderBookConstants.MAX_SNAPSHOTS_DEFAULT
     ):
-        """
-        Initialize analyzer.
-        
-        Args:
-            max_snapshots: Maximum snapshots to retain
-        """
+        """Initialize analyzer."""
         self._snapshots: Deque[OrderBookSnapshot] = deque(maxlen=max_snapshots)
         self._lock = threading.RLock()
         self._last_sequence = 0
         self._sequence_gaps = 0
         self._total_updates = 0
-        # Cache for statistics
         self._stats_cache: Optional[Dict[str, Any]] = None
         self._stats_cache_key: Tuple[int, int] = (0, 0)
 
     def add_snapshot(self, snapshot: Optional[OrderBookSnapshot]) -> None:
-        """
-        Add a new snapshot to the analyzer.
-        
-        Tracks sequence gaps for data quality monitoring.
-        """
+        """Add a new snapshot to the analyzer."""
         if snapshot is None:
             return
 
         with self._lock:
-            # Track sequence gaps
             if snapshot.sequence > 0 and self._last_sequence > 0:
                 if snapshot.sequence > self._last_sequence + 1:
                     gap = snapshot.sequence - self._last_sequence - 1
@@ -2170,8 +1276,6 @@ class OrderBookAnalyzer:
 
             self._snapshots.append(snapshot)
             self._total_updates += 1
-
-            # Invalidate cache
             self._stats_cache = None
 
     def clear(self) -> None:
@@ -2221,18 +1325,13 @@ class OrderBookAnalyzer:
         return current is not None and not current.is_stale(max_age_ms)
 
     def get_recent(self, n: int = 10) -> List[OrderBookSnapshot]:
-        """
-        Get the most recent n snapshots efficiently.
-        
-        Uses islice to avoid creating intermediate list copies.
-        """
+        """Get the most recent n snapshots efficiently."""
         with self._lock:
             length = len(self._snapshots)
             if length == 0:
                 return []
             if length <= n:
                 return list(self._snapshots)
-            # Use islice for O(n) instead of O(2n) with list()[-n:]
             start = length - n
             return list(islice(self._snapshots, start, None))
 
@@ -2248,15 +1347,7 @@ class OrderBookAnalyzer:
         self,
         timestamp_ms: int
     ) -> Optional[OrderBookSnapshot]:
-        """
-        Get snapshot at or before a specific time using binary search.
-        
-        Args:
-            timestamp_ms: Target timestamp in milliseconds
-            
-        Returns:
-            Snapshot at or before timestamp, or None if not found
-        """
+        """Get snapshot at or before a specific time using binary search."""
         with self._lock:
             if not self._snapshots:
                 return None
@@ -2274,10 +1365,6 @@ class OrderBookAnalyzer:
                     right = mid - 1
 
             return result
-
-    # ─────────────────────────────────────────────────────────
-    # SPREAD ANALYSIS
-    # ─────────────────────────────────────────────────────────
 
     def _get_valid_spreads(self, window: int) -> List[float]:
         """Get spread percentages from recent valid snapshots."""
@@ -2310,10 +1397,6 @@ class OrderBookAnalyzer:
             and current.spread_pct <= max_spread_pct
         )
 
-    # ─────────────────────────────────────────────────────────
-    # IMBALANCE ANALYSIS
-    # ─────────────────────────────────────────────────────────
-
     def _get_valid_imbalances(self, window: int) -> List[float]:
         """Get imbalances from recent valid snapshots."""
         return [s.imbalance for s in self.get_recent(window) if s.is_valid]
@@ -2325,11 +1408,7 @@ class OrderBookAnalyzer:
 
     @staticmethod
     def _calc_slope(values: List[float]) -> float:
-        """
-        Calculate linear regression slope.
-        
-        Uses simplified formula for equally-spaced data points.
-        """
+        """Calculate linear regression slope."""
         n = len(values)
         if n < 3:
             return 0.0
@@ -2338,7 +1417,6 @@ class OrderBookAnalyzer:
         sum_xy = sum(i * v for i, v in enumerate(values))
         n_f = float(n)
 
-        # Denominator for equally-spaced x values (0, 1, 2, ...)
         denom = n_f * (n_f * n_f - 1) / 12
         if denom == 0:
             return 0.0
@@ -2346,22 +1424,12 @@ class OrderBookAnalyzer:
         return (sum_xy - (n_f - 1) / 2 * sum_y) / denom
 
     def imbalance_trend(self, window: int = 20) -> float:
-        """
-        Calculate imbalance trend (slope).
-        
-        Positive = becoming more bullish
-        Negative = becoming more bearish
-        """
+        """Calculate imbalance trend (slope)."""
         imbalances = self._get_valid_imbalances(window)
         return self._calc_slope(imbalances) if len(imbalances) >= 5 else 0.0
 
     def imbalance_acceleration(self, window: int = 20) -> float:
-        """
-        Calculate change in imbalance trend.
-        
-        Positive = trend accelerating bullish
-        Negative = trend accelerating bearish
-        """
+        """Calculate change in imbalance trend."""
         imbalances = self._get_valid_imbalances(window)
         if len(imbalances) < window:
             return 0.0
@@ -2373,10 +1441,6 @@ class OrderBookAnalyzer:
         recent_slope = self._calc_slope(imbalances[half:])
         older_slope = self._calc_slope(imbalances[:half])
         return recent_slope - older_slope
-
-    # ─────────────────────────────────────────────────────────
-    # DIRECTIONAL SIGNALS
-    # ─────────────────────────────────────────────────────────
 
     def _check_pressure(
         self,
@@ -2404,14 +1468,7 @@ class OrderBookAnalyzer:
         trend_threshold: float = 0.005,
         require_both: bool = False
     ) -> bool:
-        """
-        Check for bullish order book condition.
-        
-        Args:
-            imbalance_threshold: Minimum imbalance for bullish signal
-            trend_threshold: Minimum trend slope for bullish signal
-            require_both: Require both conditions (default: either)
-        """
+        """Check for bullish order book condition."""
         return self._check_pressure(
             imbalance_threshold,
             trend_threshold,
@@ -2425,14 +1482,7 @@ class OrderBookAnalyzer:
         trend_threshold: float = 0.005,
         require_both: bool = False
     ) -> bool:
-        """
-        Check for bearish order book condition.
-        
-        Args:
-            imbalance_threshold: Minimum imbalance magnitude for bearish
-            trend_threshold: Minimum trend slope magnitude for bearish
-            require_both: Require both conditions (default: either)
-        """
+        """Check for bearish order book condition."""
         return self._check_pressure(
             imbalance_threshold,
             trend_threshold,
@@ -2441,17 +1491,7 @@ class OrderBookAnalyzer:
         )
 
     def get_signal_strength(self) -> float:
-        """
-        Get composite signal strength.
-        
-        Combines:
-        - Current imbalance (40%)
-        - Depth imbalance (40%)
-        - Imbalance trend (20%)
-        
-        Returns:
-            -1.0 (strong bearish) to +1.0 (strong bullish)
-        """
+        """Get composite signal strength."""
         current = self.current
         if not current or not current.is_valid:
             return 0.0
@@ -2463,12 +1503,7 @@ class OrderBookAnalyzer:
             OrderBookConstants.SIGNAL_TREND_WEIGHT
         )
 
-        # Clamp to [-1, 1]
         return max(-1.0, min(1.0, signal))
-
-    # ─────────────────────────────────────────────────────────
-    # WALL DETECTION
-    # ─────────────────────────────────────────────────────────
 
     def _has_wall_near(
         self,
@@ -2517,17 +1552,8 @@ class OrderBookAnalyzer:
             "ask_walls"
         )
 
-    # ─────────────────────────────────────────────────────────
-    # STATISTICS
-    # ─────────────────────────────────────────────────────────
-
     def get_statistics(self, window: int = 20) -> Dict[str, Any]:
-        """
-        Get comprehensive statistics.
-        
-        Returns cached result if no new data since last call.
-        """
-        # Check cache
+        """Get comprehensive statistics."""
         cache_key = (self._total_updates, window)
         if self._stats_cache is not None and self._stats_cache_key == cache_key:
             return self._stats_cache
@@ -2537,57 +1563,37 @@ class OrderBookAnalyzer:
             return {}
 
         result = {
-            # Current snapshot metrics
             "mid_price": current.mid_price,
             "spread": current.spread,
             "spread_pct": current.spread_pct,
             "spread_bps": current.spread_bps,
             "imbalance": current.imbalance,
             "depth_imbalance_10": current.depth_imbalance(10),
-
-            # Time series metrics
             "avg_spread_pct": self.average_spread_pct(window),
             "avg_imbalance": self.average_imbalance(window),
             "imbalance_trend": self.imbalance_trend(window),
-
-            # Signals
             "signal_strength": self.get_signal_strength(),
-
-            # Advanced pricing
             "microprice": current.microprice(),
             "weighted_mid": current.weighted_mid_price(),
-
-            # Volume
             "bid_volume_10": current.total_bid_volume(10),
             "ask_volume_10": current.total_ask_volume(10),
-
-            # Health
             "snapshot_count": self.count,
             "sequence_gaps": self.sequence_gaps,
             "data_fresh": self.is_data_fresh(),
         }
 
-        # Cache result
         self._stats_cache = result
         self._stats_cache_key = cache_key
 
         return result
 
+
 # ============================================================
-# ♦️TICK CLASSIFIER
+# TICK CLASSIFIER
 # ============================================================
 
 class TickClassifier:
-    """
-    Classifies ticks as buy or sell using tick rule.
-    
-    The tick rule:
-    - Uptick (price > last) = BUY
-    - Downtick (price < last) = SELL
-    - No change = same as last classification
-    
-    Used for reconstructing order flow from trade data.
-    """
+    """Classifies ticks as buy or sell using tick rule."""
 
     __slots__ = ('_last_price', '_last_side')
 
@@ -2597,15 +1603,7 @@ class TickClassifier:
         self._last_side = TradeSide.UNKNOWN
 
     def classify(self, price: float) -> TradeSide:
-        """
-        Classify a single tick.
-        
-        Args:
-            price: Trade price
-            
-        Returns:
-            TradeSide (BUY, SELL, or UNKNOWN)
-        """
+        """Classify a single tick."""
         if price <= 0:
             return TradeSide.UNKNOWN
 
@@ -2618,7 +1616,6 @@ class TickClassifier:
         elif price < self._last_price:
             side = TradeSide.SELL
         else:
-            # Same price - use last classification
             if self._last_side != TradeSide.UNKNOWN:
                 side = self._last_side
             else:
@@ -2644,21 +1641,7 @@ class TickClassifier:
 
 @dataclass
 class OrderFlowMetrics:
-    """
-    Order flow analysis metrics for strategy signals.
-    
-    Tracks cumulative delta (buy vs sell pressure) and
-    large trade activity for institutional flow detection.
-    
-    Attributes:
-        cumulative_delta: Running sum of signed volume (+ for buys, - for sells)
-        buy_volume: Total volume classified as buys
-        sell_volume: Total volume classified as sells
-        large_buy_count: Number of large buy trades
-        large_sell_count: Number of large sell trades
-        trade_count: Number of successfully classified trades
-        unknown_count: Number of trades that couldn't be classified
-    """
+    """Order flow analysis metrics for strategy signals."""
     cumulative_delta: float = 0.0
     buy_volume: float = 0.0
     sell_volume: float = 0.0
@@ -2669,12 +1652,7 @@ class OrderFlowMetrics:
 
     @property
     def ofi(self) -> float:
-        """
-        Order Flow Imbalance: normalized buying vs selling pressure.
-        
-        Returns:
-            -1.0 (all sells) to +1.0 (all buys)
-        """
+        """Order Flow Imbalance: normalized buying vs selling pressure."""
         total = self.buy_volume + self.sell_volume
         if total == 0:
             return 0.0
@@ -2700,12 +1678,7 @@ class OrderFlowMetrics:
 
     @property
     def large_trade_imbalance(self) -> float:
-        """
-        Imbalance in large trades (institutional activity indicator).
-        
-        Returns:
-            -1.0 (all large sells) to +1.0 (all large buys)
-        """
+        """Imbalance in large trades (institutional activity indicator)."""
         total = self.large_buy_count + self.large_sell_count
         if total == 0:
             return 0.0
@@ -2729,33 +1702,14 @@ class OrderFlowMetrics:
 
 
 class OrderFlowTracker:
-    """
-    Tracks order flow for strategy signals.
-    
-    Uses tick rule to classify trades as buys/sells and tracks:
-    - Cumulative delta (running sum of signed volume)
-    - Large trade detection (institutional activity)
-    - Order flow imbalance (OFI)
-    - Recent delta momentum
-    
-    Essential for:
-    - Detecting hidden buying/selling pressure
-    - Identifying institutional accumulation/distribution
-    - Confirming breakouts with volume
-    """
+    """Tracks order flow for strategy signals."""
 
     def __init__(
         self,
         large_trade_threshold: float = OrderBookConstants.LARGE_TRADE_THRESHOLD,
         window_size: int = 100
     ):
-        """
-        Initialize order flow tracker.
-        
-        Args:
-            large_trade_threshold: Size threshold for "large" trades
-            window_size: Window for recent delta calculations
-        """
+        """Initialize order flow tracker."""
         self.large_threshold = large_trade_threshold
         self.window_size = window_size
         self._classifier = TickClassifier()
@@ -2764,16 +1718,7 @@ class OrderFlowTracker:
         self._lock = threading.Lock()
 
     def process_trade(self, price: float, size: float) -> OrderFlowMetrics:
-        """
-        Process a single trade and update metrics.
-        
-        Args:
-            price: Trade price
-            size: Trade size
-            
-        Returns:
-            Current OrderFlowMetrics snapshot
-        """
+        """Process a single trade and update metrics."""
         if price <= 0 or size <= 0:
             return self.get_metrics()
 
@@ -2797,22 +1742,13 @@ class OrderFlowTracker:
                     self._metrics.large_sell_count += 1
 
             else:
-                # Unknown classification
                 self._metrics.unknown_count += 1
                 self._recent_deltas.append(0)
 
             return self._copy_metrics()
 
     def process_batch(self, trades: List[SimpleTrade]) -> OrderFlowMetrics:
-        """
-        Process multiple trades: [(price, size), ...]
-        
-        Args:
-            trades: List of (price, size) tuples
-            
-        Returns:
-            Current OrderFlowMetrics snapshot
-        """
+        """Process multiple trades: [(price, size), ...]"""
         for price, size in trades:
             self.process_trade(price, size)
         return self.get_metrics()
@@ -2840,12 +1776,7 @@ class OrderFlowTracker:
             return sum(self._recent_deltas)
 
     def get_delta_momentum(self) -> float:
-        """
-        Get delta momentum (recent vs older activity).
-        
-        Positive = accelerating buying
-        Negative = accelerating selling
-        """
+        """Get delta momentum (recent vs older activity)."""
         with self._lock:
             if len(self._recent_deltas) < 10:
                 return 0.0
@@ -2865,20 +1796,11 @@ class OrderFlowTracker:
 
 
 # ============================================================
-#🎀 SLIPPAGE ESTIMATOR
+# SLIPPAGE ESTIMATOR
 # ============================================================
 
 class SlippageEstimator:
-    """
-    Estimates slippage for trade execution simulation.
-    
-    Provides multiple estimation methods:
-    - Realistic: Order book-based simulation
-    - Fixed: Constant basis points slippage
-    - Fill simulation with slippage limits
-    
-    Critical for realistic backtesting PnL calculation.
-    """
+    """Estimates slippage for trade execution simulation."""
 
     @staticmethod
     def estimate(
@@ -2887,44 +1809,28 @@ class SlippageEstimator:
         side: str,
         aggression: float = 1.0
     ) -> Tuple[float, float, float]:
-        """
-        Estimate execution price and slippage.
-        
-        Args:
-            snapshot: Current order book
-            size: Order size
-            side: 'buy' or 'sell'
-            aggression: 0.0 (passive limit) to 1.0 (aggressive market)
-        
-        Returns:
-            Tuple of (estimated_price, slippage_bps, fill_probability)
-        """
+        """Estimate execution price and slippage."""
         if not snapshot or not snapshot.is_valid:
             return 0.0, 0.0, 0.0
 
         mid = snapshot.mid_price
 
-        # Passive order: sits at best bid/ask
         if aggression < 0.3:
             if side == "buy":
                 price = snapshot.best_bid
             else:
                 price = snapshot.best_ask
 
-            # Calculate slippage from mid
             if mid > 0:
                 slippage = abs(price - mid) / mid * 10000
             else:
                 slippage = 0.0
 
-            # Lower fill probability for passive orders
             fill_prob = 0.3 + aggression
 
-        # Aggressive order: crosses spread + walks book
         else:
             price = snapshot.market_impact(size, side)
 
-            # Calculate slippage from mid
             if mid > 0:
                 slippage = abs(price - mid) / mid * 10000
             else:
@@ -2940,23 +1846,13 @@ class SlippageEstimator:
         side: str,
         slippage_bps: float = OrderBookConstants.DEFAULT_SLIPPAGE_BPS
     ) -> float:
-        """
-        Apply fixed slippage to a price.
-        
-        Args:
-            price: Base price
-            side: 'buy' or 'sell'
-            slippage_bps: Slippage in basis points
-            
-        Returns:
-            Adjusted price after slippage
-        """
+        """Apply fixed slippage to a price."""
         slip_mult = slippage_bps / 10000
 
         if side == "buy":
-            return price * (1 + slip_mult)  # Pay more to buy
+            return price * (1 + slip_mult)
         else:
-            return price * (1 - slip_mult)  # Receive less to sell
+            return price * (1 - slip_mult)
 
     @staticmethod
     def simulate_fill(
@@ -2965,18 +1861,7 @@ class SlippageEstimator:
         side: str,
         max_slippage_bps: float = 10.0
     ) -> Optional[Tuple[float, float]]:
-        """
-        Simulate order fill with slippage limit.
-        
-        Args:
-            snapshot: Order book snapshot
-            size: Order size
-            side: 'buy' or 'sell'
-            max_slippage_bps: Maximum acceptable slippage
-        
-        Returns:
-            (fill_price, filled_size) or None if unfillable within limit
-        """
+        """Simulate order fill with slippage limit."""
         if not snapshot or not snapshot.is_valid:
             return None
 
@@ -2984,7 +1869,6 @@ class SlippageEstimator:
         if mid <= 0:
             return None
 
-        # Calculate price limit based on slippage
         if side == "buy":
             max_price = mid * (1 + max_slippage_bps / 10000)
             levels = snapshot.asks
@@ -2992,12 +1876,10 @@ class SlippageEstimator:
             max_price = mid * (1 - max_slippage_bps / 10000)
             levels = snapshot.bids
 
-        # Walk through levels
         filled = 0.0
         cost = 0.0
 
         for level in levels:
-            # Check price limit
             if side == "buy" and level.price > max_price:
                 break
             if side == "sell" and level.price < max_price:
@@ -3021,11 +1903,7 @@ class SlippageEstimator:
         size: float,
         side: str
     ) -> Dict[str, float]:
-        """
-        Calculate detailed market impact costs.
-        
-        Returns breakdown of execution costs for analysis.
-        """
+        """Calculate detailed market impact costs."""
         if not snapshot or not snapshot.is_valid:
             return {"error": "invalid_snapshot"}
 
@@ -3033,13 +1911,11 @@ class SlippageEstimator:
         fill_price = snapshot.market_impact(size, side)
         half_spread = snapshot.spread / 2
 
-        # Estimate the price if we just crossed the spread
         if side == "buy":
             cross_price = mid + half_spread
         else:
             cross_price = mid - half_spread
 
-        # Price impact beyond crossing spread
         price_impact = abs(fill_price - cross_price)
 
         return {
@@ -3058,17 +1934,7 @@ class SlippageEstimator:
 # ============================================================
 
 class BacktestExecutionSimulator:
-    """
-    Simulates trade execution for backtesting.
-    
-    Integrates with order book data to provide realistic execution
-    simulation including:
-    - Slippage modeling (none, fixed, or realistic)
-    - Fee calculation
-    - Partial fills (optional)
-    - Complete round-trip simulation
-    - Execution statistics tracking
-    """
+    """Simulates trade execution for backtesting."""
 
     def __init__(
         self,
@@ -3077,15 +1943,7 @@ class BacktestExecutionSimulator:
         fee_bps: float = OrderBookConstants.DEFAULT_FEE_BPS,
         partial_fill_enabled: bool = False
     ):
-        """
-        Initialize execution simulator.
-        
-        Args:
-            slippage_model: "none", "fixed", or "realistic"
-            fixed_slippage_bps: Slippage for fixed model (default 2 bps)
-            fee_bps: Trading fee in basis points (default 4 bps = 0.04%)
-            partial_fill_enabled: Whether to simulate partial fills
-        """
+        """Initialize execution simulator."""
         if slippage_model not in ("none", "fixed", "realistic"):
             raise ValueError(
                 f"Invalid slippage_model: {slippage_model}. "
@@ -3097,7 +1955,6 @@ class BacktestExecutionSimulator:
         self.fee_bps = fee_bps
         self.partial_fill_enabled = partial_fill_enabled
 
-        # Statistics tracking
         self._total_fees = 0.0
         self._total_slippage_cost = 0.0
         self._trade_count = 0
@@ -3110,26 +1967,13 @@ class BacktestExecutionSimulator:
         orderbook: Optional[OrderBookSnapshot] = None,
         aggression: float = 1.0
     ) -> Dict[str, Any]:
-        """
-        Simulate order entry.
-        
-        Args:
-            signal_price: Price at which signal was generated
-            size: Order size
-            side: 'buy' or 'sell'
-            orderbook: Optional order book for realistic slippage
-            aggression: 0.0 (passive) to 1.0 (aggressive)
-        
-        Returns:
-            Execution details dictionary
-        """
+        """Simulate order entry."""
         if side not in ("buy", "sell"):
             raise ValueError(f"Invalid side: {side}. Must be 'buy' or 'sell'")
 
         if size <= 0:
             raise ValueError(f"Size must be positive: {size}")
 
-        # Determine fill price based on slippage model
         if self.slippage_model == "none":
             fill_price = signal_price
             slippage_bps = 0.0
@@ -3146,7 +1990,7 @@ class BacktestExecutionSimulator:
             fill_size = size
             fill_prob = 1.0
 
-        else:  # realistic
+        else:
             if orderbook and orderbook.is_valid:
                 fill_price, slippage_bps, fill_prob = SlippageEstimator.estimate(
                     orderbook,
@@ -3155,13 +1999,11 @@ class BacktestExecutionSimulator:
                     aggression
                 )
 
-                # Handle partial fills
                 if self.partial_fill_enabled and fill_prob < 1.0:
                     fill_size = size * fill_prob
                 else:
                     fill_size = size
             else:
-                # Fallback to fixed model if no orderbook
                 fill_price = SlippageEstimator.estimate_fixed(
                     signal_price,
                     side,
@@ -3171,10 +2013,8 @@ class BacktestExecutionSimulator:
                 fill_size = size
                 fill_prob = 1.0
 
-        # Calculate fee
         fee = fill_price * fill_size * (self.fee_bps / 10000)
 
-        # Calculate total outlay/proceeds
         if side == "buy":
             total_outlay = fill_price * fill_size + fee
             net_proceeds = 0.0
@@ -3182,7 +2022,6 @@ class BacktestExecutionSimulator:
             total_outlay = 0.0
             net_proceeds = fill_price * fill_size - fee
 
-        # Track statistics
         self._total_fees += fee
         slippage_cost = abs(fill_price - signal_price) * fill_size
         self._total_slippage_cost += slippage_cost
@@ -3212,22 +2051,9 @@ class BacktestExecutionSimulator:
         orderbook: Optional[OrderBookSnapshot] = None,
         aggression: float = 1.0
     ) -> Dict[str, Any]:
-        """
-        Simulate exit and calculate PnL.
-        
-        Args:
-            entry: Entry execution dict from simulate_entry()
-            exit_price: Signal exit price
-            orderbook: Optional order book for realistic slippage
-            aggression: 0.0 (passive) to 1.0 (aggressive)
-        
-        Returns:
-            Complete trade result with PnL
-        """
-        # Determine exit side
+        """Simulate exit and calculate PnL."""
         exit_side = "sell" if entry["side"] == "buy" else "buy"
 
-        # Simulate exit
         exit_result = self.simulate_entry(
             exit_price,
             entry["size"],
@@ -3236,24 +2062,19 @@ class BacktestExecutionSimulator:
             aggression
         )
 
-        # Calculate PnL
         if entry["side"] == "buy":
-            # Long trade: profit = exit - entry
             gross_pnl = (
                 exit_result["fill_price"] - entry["fill_price"]
             ) * entry["size"]
         else:
-            # Short trade: profit = entry - exit
             gross_pnl = (
                 entry["fill_price"] - exit_result["fill_price"]
             ) * entry["size"]
 
-        # Total costs
         total_fees = entry["fee"] + exit_result["fee"]
         total_slippage_cost = entry["slippage_cost"] + exit_result["slippage_cost"]
         net_pnl = gross_pnl - total_fees
 
-        # Calculate return percentage
         if entry["side"] == "buy":
             initial_value = entry["fill_price"] * entry["size"]
         else:
@@ -3283,23 +2104,7 @@ class BacktestExecutionSimulator:
         exit_orderbook: Optional[OrderBookSnapshot] = None,
         aggression: float = 1.0
     ) -> Dict[str, Any]:
-        """
-        Simulate complete round-trip trade.
-        
-        Convenience method for simulating entry and exit together.
-        
-        Args:
-            entry_price: Signal entry price
-            exit_price: Signal exit price
-            size: Trade size
-            side: Entry side ('buy' or 'sell')
-            entry_orderbook: Order book at entry
-            exit_orderbook: Order book at exit
-            aggression: Execution aggression level
-            
-        Returns:
-            Complete trade result
-        """
+        """Simulate complete round-trip trade."""
         entry = self.simulate_entry(
             entry_price,
             size,
@@ -3337,17 +2142,7 @@ class BacktestExecutionSimulator:
 # ============================================================
 
 class SyntheticOrderBook:
-    """
-    Generates synthetic order books from tick data.
-    
-    Essential for backtesting when order book data is unavailable.
-    
-    The generated order book uses:
-    - Recent price volatility to determine spread
-    - Tick classification to estimate imbalance
-    - Size data (if available) to weight levels
-    - Reproducible randomness for consistent backtests
-    """
+    """Generates synthetic order books from tick data."""
 
     @staticmethod
     def from_ticks(
@@ -3360,34 +2155,16 @@ class SyntheticOrderBook:
         use_tick_classification: bool = True,
         random_seed: Optional[int] = None
     ) -> Optional[OrderBookSnapshot]:
-        """
-        Generate a synthetic order book from tick data.
-        
-        Args:
-            ticks: List of (timestamp_ms, price) tuples
-            tick_sizes: Optional list of trade sizes (parallel to ticks)
-            spread_bps: Base spread in basis points
-            levels: Number of price levels to generate
-            size_decay: Size decay factor per level (0-1)
-            base_size: Base size for level 0
-            use_tick_classification: Use tick rule for imbalance estimation
-            random_seed: For reproducible results
-            
-        Returns:
-            OrderBookSnapshot or None if insufficient data
-        """
+        """Generate a synthetic order book from tick data."""
         if not ticks:
             return None
 
-        # Use isolated RNG for reproducibility
         rng = random.Random(random_seed)
 
-        # Get latest tick
         last_ts, last_price = ticks[-1]
         if last_price <= 0:
             return None
 
-        # Calculate spread based on recent volatility
         spread_pct = spread_bps / 10000
 
         if len(ticks) > 10:
@@ -3398,7 +2175,6 @@ class SyntheticOrderBook:
 
             if avg_p > 0:
                 vol_ratio = (max_p - min_p) / avg_p
-                # Increase spread based on volatility
                 spread_mult = max(
                     1.0,
                     1 + vol_ratio * OrderBookConstants.VOLATILITY_SPREAD_MULT
@@ -3407,9 +2183,8 @@ class SyntheticOrderBook:
                 spread_pct *= spread_mult
 
         half_spread = last_price * spread_pct / 2
-        tick_size = last_price * 0.0001  # 1 bps tick size
+        tick_size = last_price * 0.0001
 
-        # Calculate imbalance from tick classification
         imbalance_mult = 1.0
         if use_tick_classification and len(ticks) > 5:
             classifier = TickClassifier()
@@ -3419,10 +2194,8 @@ class SyntheticOrderBook:
             sells = sum(1 for s in sides if s == TradeSide.SELL)
 
             if buys + sells > 0:
-                # Adjust imbalance multiplier based on flow
                 imbalance_mult = 1 + (buys - sells) / (buys + sells) * 0.3
 
-        # Apply size weighting if available
         size_weight = 1.0
         if tick_sizes and len(tick_sizes) >= len(ticks):
             recent_sizes = tick_sizes[-20:]
@@ -3430,23 +2203,18 @@ class SyntheticOrderBook:
                 avg_size = sum(recent_sizes) / len(recent_sizes)
                 size_weight = max(0.5, min(2.0, avg_size / base_size))
 
-        # Generate levels
         bids: List[OrderBookLevel] = []
         asks: List[OrderBookLevel] = []
 
         for i in range(levels):
-            # Size decays with distance from mid
             size = base_size * size_weight * (size_decay ** i)
 
-            # Add randomness for realism
             jitter_bid = 0.5 + rng.random()
             jitter_ask = 0.5 + rng.random()
 
-            # Calculate prices
             bid_price = last_price - half_spread - tick_size * i
             ask_price = last_price + half_spread + tick_size * i
 
-            # Apply imbalance (more bids if bullish, more asks if bearish)
             bid_size = size * imbalance_mult * jitter_bid
             ask_size = size * (2 - imbalance_mult) * jitter_ask
 
@@ -3472,33 +2240,12 @@ class SyntheticOrderBook:
         levels: int = OrderBookConstants.DEFAULT_LEVELS,
         random_seed: Optional[int] = None
     ) -> OrderBookSnapshot:
-        """
-        Generate synthetic order book from OHLCV candle.
-        
-        Uses candle data to estimate spread and size distribution.
-        
-        Args:
-            timestamp: Candle timestamp
-            open_price: Open price
-            high_price: High price
-            low_price: Low price
-            close_price: Close price (used as current price)
-            volume: Candle volume
-            levels: Number of price levels
-            random_seed: For reproducibility
-            
-        Returns:
-            OrderBookSnapshot
-            
-        Raises:
-            ValueError: If close_price is not positive
-        """
+        """Generate synthetic order book from OHLCV candle."""
         if close_price <= 0:
             raise ValueError(f"Close price must be positive: {close_price}")
 
         rng = random.Random(random_seed)
 
-        # Spread based on volume (more volume = tighter spread)
         if volume > 0:
             spread_bps = max(
                 OrderBookConstants.MIN_SPREAD_BPS,
@@ -3511,7 +2258,6 @@ class SyntheticOrderBook:
         tick_size = close_price * 0.0001
         base_size = max(1.0, volume / levels / 20)
 
-        # Generate levels
         bids: List[OrderBookLevel] = []
         asks: List[OrderBookLevel] = []
 
@@ -3540,21 +2286,7 @@ class SyntheticOrderBook:
         sample_every: int = 10,
         **kwargs
     ) -> Optional[OrderBookAnalyzer]:
-        """
-        Generate an OrderBookAnalyzer with historical snapshots.
-        
-        Creates snapshots at regular intervals from tick data.
-        Useful for backtesting strategies that need order book history.
-        
-        Args:
-            ticks: List of (timestamp_ms, price) tuples
-            tick_sizes: Optional list of trade sizes
-            sample_every: Generate snapshot every N ticks
-            **kwargs: Passed to from_ticks()
-            
-        Returns:
-            OrderBookAnalyzer with historical snapshots, or None if insufficient data
-        """
+        """Generate an OrderBookAnalyzer with historical snapshots."""
         if not ticks or len(ticks) < sample_every:
             return None
 
@@ -3564,7 +2296,7 @@ class SyntheticOrderBook:
             snapshot = SyntheticOrderBook.from_ticks(
                 ticks=ticks[:i],
                 tick_sizes=tick_sizes[:i] if tick_sizes else None,
-                random_seed=i,  # Reproducible per snapshot
+                random_seed=i,
                 **kwargs
             )
             if snapshot and snapshot.is_valid:
@@ -3578,16 +2310,7 @@ class SyntheticOrderBook:
 # ============================================================
 
 class BacktestOrderBookProvider:
-    """
-    Provides order book data for backtesting.
-    
-    Supports loading from:
-    - Pre-recorded snapshots
-    - Tick data (generates synthetic order books)
-    - Candle data (generates synthetic order books)
-    
-    Provides time-based lookup for historical replay.
-    """
+    """Provides order book data for backtesting."""
 
     def __init__(self):
         """Initialize backtest provider."""
@@ -3600,18 +2323,11 @@ class BacktestOrderBookProvider:
         symbol: str,
         snapshots: List[OrderBookSnapshot]
     ) -> None:
-        """
-        Load pre-recorded snapshots.
-        
-        Args:
-            symbol: Trading pair symbol
-            snapshots: List of snapshots (will be sorted by timestamp)
-        """
+        """Load pre-recorded snapshots."""
         with self._lock:
             if symbol not in self._analyzers:
                 self._analyzers[symbol] = OrderBookAnalyzer()
 
-            # Sort and add snapshots
             for snap in sorted(snapshots, key=lambda s: s.timestamp):
                 self._analyzers[symbol].add_snapshot(snap)
 
@@ -3623,16 +2339,7 @@ class BacktestOrderBookProvider:
         sample_every: int = 10,
         **kwargs
     ) -> None:
-        """
-        Generate synthetic order book from tick data.
-        
-        Args:
-            symbol: Trading pair symbol
-            ticks: List of (timestamp_ms, price) tuples
-            tick_sizes: Optional list of trade sizes
-            sample_every: Generate snapshot every N ticks
-            **kwargs: Additional arguments for SyntheticOrderBook
-        """
+        """Generate synthetic order book from tick data."""
         analyzer = SyntheticOrderBook.generate_analyzer(
             ticks,
             tick_sizes,
@@ -3649,15 +2356,7 @@ class BacktestOrderBookProvider:
         candles: List[Dict[str, Any]],
         **kwargs
     ) -> None:
-        """
-        Generate synthetic order book from OHLCV candles.
-        
-        Args:
-            symbol: Trading pair symbol
-            candles: List of candle dicts with keys:
-                     timestamp, open, high, low, close, volume
-            **kwargs: Additional arguments for SyntheticOrderBook
-        """
+        """Generate synthetic order book from OHLCV candles."""
         with self._lock:
             if symbol not in self._analyzers:
                 self._analyzers[symbol] = OrderBookAnalyzer()
@@ -3679,12 +2378,7 @@ class BacktestOrderBookProvider:
                     logger.warning(f"Failed to create snapshot from candle {i}: {e}")
 
     def set_time(self, timestamp_ms: int) -> None:
-        """
-        Set current backtest time.
-        
-        Args:
-            timestamp_ms: Current time in milliseconds
-        """
+        """Set current backtest time."""
         self._current_time = timestamp_ms
 
     def get_analyzer(self, symbol: str) -> Optional[OrderBookAnalyzer]:
@@ -3702,18 +2396,7 @@ class BacktestOrderBookProvider:
         symbol: str,
         timestamp_ms: int
     ) -> Optional[OrderBookSnapshot]:
-        """
-        Get snapshot at or before a specific time.
-        
-        Uses binary search for efficient lookup.
-        
-        Args:
-            symbol: Trading pair symbol
-            timestamp_ms: Target timestamp
-            
-        Returns:
-            Snapshot at or before timestamp, or None
-        """
+        """Get snapshot at or before a specific time."""
         with self._lock:
             analyzer = self._analyzers.get(symbol)
             if not analyzer:
@@ -3726,12 +2409,7 @@ class BacktestOrderBookProvider:
             return list(self._analyzers.keys())
 
     def clear(self, symbol: Optional[str] = None) -> None:
-        """
-        Clear data for symbol or all symbols.
-        
-        Args:
-            symbol: Symbol to clear, or None for all
-        """
+        """Clear data for symbol or all symbols."""
         with self._lock:
             if symbol:
                 self._analyzers.pop(symbol, None)
@@ -3785,16 +2463,7 @@ class BaseOrderBookStream(ABC):
 # ============================================================
 
 class _StreamBase(BaseOrderBookStream):
-    """
-    Common implementation for WebSocket streams.
-    
-    Provides:
-    - Symbol tracking with analyzers
-    - Callback management
-    - Health monitoring
-    - Background thread management
-    - Graceful shutdown
-    """
+    """Common implementation for WebSocket streams."""
 
     def __init__(self):
         """Initialize stream base."""
@@ -3814,11 +2483,7 @@ class _StreamBase(BaseOrderBookStream):
         return bool(OrderBookConstants.SYMBOL_PATTERN.match(symbol))
 
     def _init_symbol(self, symbol: str, callback: Optional[Callback]) -> bool:
-        """
-        Initialize tracking for a symbol.
-        
-        Returns True if this is a new symbol.
-        """
+        """Initialize tracking for a symbol."""
         if not self._validate_symbol(symbol):
             raise ValueError(f"Invalid symbol format: {symbol}")
 
@@ -3901,14 +2566,12 @@ class _StreamBase(BaseOrderBookStream):
         timestamp: int
     ) -> None:
         """Process a new snapshot (add to analyzer, invoke callbacks)."""
-        # Add to analyzer and record update
         with self._lock:
             if symbol in self._analyzers:
                 self._analyzers[symbol].add_snapshot(snapshot)
             self._record_update(symbol, timestamp)
             callbacks = list(self._callbacks.get(symbol, []))
 
-        # Invoke callbacks outside lock
         for cb in callbacks:
             try:
                 cb(snapshot)
@@ -3938,7 +2601,6 @@ class _StreamBase(BaseOrderBookStream):
             if coro_factory:
                 self._loop.run_until_complete(coro_factory())
             else:
-                # Run until stopped
                 async def run_until_stopped():
                     while self._running:
                         await asyncio.sleep(0.1)
@@ -3959,13 +2621,11 @@ class _StreamBase(BaseOrderBookStream):
             return
 
         try:
-            # Cancel all pending tasks
             try:
                 pending = asyncio.all_tasks(self._loop)
                 for task in pending:
                     task.cancel()
 
-                # Wait for cancellations
                 if pending and not self._loop.is_closed():
                     try:
                         self._loop.run_until_complete(
@@ -3976,7 +2636,6 @@ class _StreamBase(BaseOrderBookStream):
             except RuntimeError:
                 pass
 
-            # Final brief pause for transport cleanup
             if not self._loop.is_closed():
                 try:
                     self._loop.run_until_complete(asyncio.sleep(0.01))
@@ -3997,18 +2656,15 @@ class _StreamBase(BaseOrderBookStream):
         """Stop the stream gracefully."""
         self._running = False
 
-        # Mark all as disconnected
         with self._lock:
             for h in self._health.values():
                 h.connected = False
 
-        # Cancel tasks
         if tasks:
             for task in tasks:
                 if hasattr(task, 'cancel'):
                     task.cancel()
 
-        # Signal loop to stop
         if self._loop and not self._loop.is_closed():
             try:
                 if self._loop.is_running():
@@ -4016,7 +2672,6 @@ class _StreamBase(BaseOrderBookStream):
             except Exception:
                 pass
 
-        # Wait for thread
         if self._thread and self._thread.is_alive():
             if threading.current_thread() != self._thread:
                 self._thread.join(timeout=OrderBookConstants.SHUTDOWN_TIMEOUT)
@@ -4025,14 +2680,11 @@ class _StreamBase(BaseOrderBookStream):
 
 
 # ============================================================
-# ♦️BINANCE SINGLE SYMBOL STREAM
+# BINANCE SINGLE SYMBOL STREAM
 # ============================================================
+
 class BinanceOrderBookStream(_StreamBase):
-    """
-    WebSocket stream for a single Binance symbol.
-    
-    For multiple symbols, use BinanceMultiStream which is more efficient.
-    """
+    """WebSocket stream for a single Binance symbol."""
 
     def __init__(
         self,
@@ -4040,14 +2692,7 @@ class BinanceOrderBookStream(_StreamBase):
         testnet: bool = False,
         alerts: Optional[AlertManager] = None
     ):
-        """
-        Initialize Binance stream.
-        
-        Args:
-            max_reconnect_attempts: Max reconnection attempts before giving up
-            testnet: Use testnet endpoint
-            alerts: Optional alert manager for notifications
-        """
+        """Initialize Binance stream."""
         super().__init__()
 
         self._base_url = (
@@ -4182,7 +2827,6 @@ class BinanceOrderBookStream(_StreamBase):
 
             timestamp = data.get("E", _now_ms())
 
-            # Use fast Binance path - bypasses validation and sorting
             snapshot = OrderBookSnapshot.from_binance_fast(
                 symbol=symbol,
                 bids=bids,
@@ -4191,11 +2835,9 @@ class BinanceOrderBookStream(_StreamBase):
                 sequence=data.get("lastUpdateId", 0)
             )
 
-            # Quick validity check (minimal overhead)
             if not snapshot.bids or not snapshot.asks:
                 return
 
-            # Check for crossed book (rare but possible during high volatility)
             if snapshot.bids[0].price >= snapshot.asks[0].price:
                 self._validation_failures[symbol] = (
                     self._validation_failures.get(symbol, 0) + 1
@@ -4219,20 +2861,11 @@ class BinanceOrderBookStream(_StreamBase):
 
 
 # ============================================================
-# ♦️BINANCE MULTI-SYMBOL STREAM
+# BINANCE MULTI-SYMBOL STREAM
 # ============================================================
+
 class BinanceMultiStream(_StreamBase):
-    """
-    Efficient multi-symbol WebSocket stream for Binance.
-    
-    Uses combined streams (up to 100 symbols per connection).
-    More efficient than individual connections for multiple symbols.
-    
-    Optimizations:
-    - Pre-compiled symbol mappings for O(1) lookup
-    - Fast Binance parsing path (no validation overhead)
-    - Minimal string operations in hot path
-    """
+    """Efficient multi-symbol WebSocket stream for Binance."""
 
     MAX_STREAMS_PER_CONNECTION: Final[int] = 100
     MAX_CONNECTIONS: Final[int] = 5
@@ -4242,13 +2875,7 @@ class BinanceMultiStream(_StreamBase):
         testnet: bool = False,
         alerts: Optional[AlertManager] = None
     ):
-        """
-        Initialize multi-symbol stream.
-        
-        Args:
-            testnet: Use testnet endpoint
-            alerts: Optional alert manager
-        """
+        """Initialize multi-symbol stream."""
         super().__init__()
 
         self._base_url = (
@@ -4259,11 +2886,10 @@ class BinanceMultiStream(_StreamBase):
         self._connection_tasks: List[asyncio.Task] = []
         self._update_counts: Dict[str, int] = {}
         self._last_health_calc = time.time()
-        
-        # Pre-compiled symbol mappings for O(1) lookup
-        self._symbol_to_ws: Dict[str, str] = {}       # "BTCUSDT" -> "BTC/USDT"
-        self._stream_to_symbol: Dict[str, str] = {}   # "btcusdt@depth20@100ms" -> "BTC/USDT"
-        
+
+        self._symbol_to_ws: Dict[str, str] = {}
+        self._stream_to_symbol: Dict[str, str] = {}
+
         self._msg_count = 0
         self._alerts = alerts
         self._validation_failures: Dict[str, int] = {}
@@ -4299,13 +2925,9 @@ class BinanceMultiStream(_StreamBase):
         return chunks
 
     def _build_stream_url(self, symbols: List[str]) -> str:
-        """
-        Build combined stream URL.
-        
-        Truncates if URL would be too long, with warning.
-        """
+        """Build combined stream URL."""
         original_count = len(symbols)
-        symbols = list(symbols)  # Don't modify original
+        symbols = list(symbols)
 
         while symbols:
             streams = "/".join(
@@ -4333,13 +2955,11 @@ class BinanceMultiStream(_StreamBase):
         callback: Optional[Callback]
     ) -> None:
         """Internal subscribe implementation with pre-compiled mappings."""
-        # Validate all symbols
         invalid = [s for s in symbols if not self._validate_symbol(s)]
         if invalid:
             raise ValueError(f"Invalid symbols: {invalid}")
 
         with self._lock:
-            # Check capacity
             new_symbols = [s for s in symbols if s not in self._symbols]
             new_count = len(self._symbols) + len(new_symbols)
 
@@ -4348,21 +2968,18 @@ class BinanceMultiStream(_StreamBase):
                     f"Exceeds capacity: {new_count} > {self.max_capacity}"
                 )
 
-            # Initialize each symbol with pre-compiled mappings
             for symbol in symbols:
                 if symbol not in self._analyzers:
                     self._analyzers[symbol] = OrderBookAnalyzer()
                     self._callbacks[symbol] = []
                     self._health[symbol] = StreamHealth()
-                    
-                    # Pre-compile ALL mappings at subscription time
-                    # This avoids string operations on every message
+
                     clean_lower = symbol.replace("/", "").replace("-", "").lower()
                     clean_upper = clean_lower.upper()
                     stream_key = f"{clean_lower}@depth20@100ms"
-                    
+
                     self._symbol_to_ws[clean_upper] = symbol
-                    self._stream_to_symbol[stream_key] = symbol  # O(1) direct lookup
+                    self._stream_to_symbol[stream_key] = symbol
 
                 if callback and callback not in self._callbacks[symbol]:
                     self._callbacks[symbol].append(callback)
@@ -4371,7 +2988,6 @@ class BinanceMultiStream(_StreamBase):
 
         self._symbols_changed.set()
 
-        # Start if not running
         with self._init_lock:
             if not self._running:
                 self._start_background(self._run_loop)
@@ -4393,12 +3009,11 @@ class BinanceMultiStream(_StreamBase):
         """Unsubscribe from a symbol."""
         with self._lock:
             self._symbols.discard(symbol)
-            
-            # Clean up all mappings
+
             clean_lower = symbol.replace("/", "").replace("-", "").lower()
             clean_upper = clean_lower.upper()
             stream_key = f"{clean_lower}@depth20@100ms"
-            
+
             self._symbol_to_ws.pop(clean_upper, None)
             self._stream_to_symbol.pop(stream_key, None)
 
@@ -4452,12 +3067,10 @@ class BinanceMultiStream(_StreamBase):
                     await asyncio.sleep(1)
                     continue
 
-                # Reconnect if symbols changed
                 if new_symbols != current_symbols or self._symbols_changed.is_set():
                     self._symbols_changed.clear()
                     current_symbols = new_symbols
 
-                    # Cancel existing connections
                     for task in self._connection_tasks:
                         if not task.done():
                             task.cancel()
@@ -4472,7 +3085,6 @@ class BinanceMultiStream(_StreamBase):
                             pass
                         self._connection_tasks.clear()
 
-                    # Start new connections
                     chunks = self._chunk_symbols(list(current_symbols))
                     self._connection_tasks = [
                         asyncio.create_task(
@@ -4515,7 +3127,6 @@ class BinanceMultiStream(_StreamBase):
                     logger.info(f"Connection {conn_id}: {len(symbols)} symbols")
                     backoff = 1.0
 
-                    # Mark all connected
                     for s in symbols:
                         self._update_health(s, connected=True)
 
@@ -4543,7 +3154,6 @@ class BinanceMultiStream(_StreamBase):
                 if not self._running:
                     return
 
-                # Mark disconnected
                 for s in symbols:
                     self._update_health(
                         s,
@@ -4563,8 +3173,7 @@ class BinanceMultiStream(_StreamBase):
         try:
             stream = data.get("stream", "")
             payload = data.get("data", {})
-            
-            # O(1) direct lookup - no string splitting or upper() needed
+
             symbol = self._stream_to_symbol.get(stream)
             if not symbol:
                 return
@@ -4578,7 +3187,6 @@ class BinanceMultiStream(_StreamBase):
             timestamp = payload.get("E", _now_ms())
             now = time.time()
 
-            # Use fast Binance path - bypasses validation and sorting
             snapshot = OrderBookSnapshot.from_binance_fast(
                 symbol=symbol,
                 bids=bids,
@@ -4587,11 +3195,9 @@ class BinanceMultiStream(_StreamBase):
                 sequence=payload.get("lastUpdateId", 0)
             )
 
-            # Quick validity check (minimal overhead)
             if not snapshot.bids or not snapshot.asks:
                 return
 
-            # Check for crossed book (rare but possible during high volatility)
             if snapshot.bids[0].price >= snapshot.asks[0].price:
                 self._validation_failures[symbol] = (
                     self._validation_failures.get(symbol, 0) + 1
@@ -4600,7 +3206,6 @@ class BinanceMultiStream(_StreamBase):
 
             self._validation_failures[symbol] = 0
 
-            # Update state
             with self._lock:
                 if symbol in self._analyzers:
                     self._analyzers[symbol].add_snapshot(snapshot)
@@ -4610,13 +3215,11 @@ class BinanceMultiStream(_StreamBase):
                     if timestamp > 0:
                         self._health[symbol].latency_ms = now * 1000 - timestamp
 
-                # Update counts
                 self._update_counts[symbol] = (
                     self._update_counts.get(symbol, 0) + 1
                 )
                 self._msg_count += 1
 
-                # Periodic health calculation
                 if now - self._last_health_calc >= OrderBookConstants.HEALTH_CALC_INTERVAL:
                     elapsed = now - self._last_health_calc
                     for sym, cnt in self._update_counts.items():
@@ -4627,7 +3230,6 @@ class BinanceMultiStream(_StreamBase):
 
                 callbacks = list(self._callbacks.get(symbol, []))
 
-            # Invoke callbacks
             for cb in callbacks:
                 try:
                     cb(snapshot)
@@ -4658,12 +3260,10 @@ class BinanceMultiStream(_StreamBase):
             for h in self._health.values():
                 h.connected = False
 
-        # Cancel all tasks
         for task in self._connection_tasks:
             if not task.done():
                 task.cancel()
 
-        # Wait for tasks
         if self._loop and not self._loop.is_closed() and self._connection_tasks:
             try:
                 future = asyncio.run_coroutine_threadsafe(
@@ -4696,7 +3296,6 @@ class BinanceMultiStream(_StreamBase):
                 "updates_per_second": 0,
             }
 
-        # Collect metrics
         latencies = sorted([
             h.latency_ms for h in all_health.values()
             if h.latency_ms > 0
@@ -4706,7 +3305,6 @@ class BinanceMultiStream(_StreamBase):
         healthy_count = sum(1 for h in all_health.values() if h.is_healthy)
         total_symbols = len(all_health)
 
-        # Determine status
         if healthy_count == total_symbols:
             status = "healthy"
         elif healthy_count >= total_symbols * 0.9:
@@ -4750,27 +3348,14 @@ class BinanceMultiStream(_StreamBase):
 
 
 # ============================================================
-# 🎃CCXT PRO STREAM (OPTIONAL)
+# CCXT PRO STREAM (OPTIONAL)
 # ============================================================
 
 class CCXTOrderBookStream(_StreamBase):
-    """
-    Order book stream using CCXT Pro.
-    
-    Supports multiple exchanges with a unified interface.
-    Requires ccxt.pro to be installed.
-    """
+    """Order book stream using CCXT Pro."""
 
     def __init__(self, exchange_id: str = "binance"):
-        """
-        Initialize CCXT stream.
-        
-        Args:
-            exchange_id: CCXT exchange identifier
-            
-        Raises:
-            ImportError: If ccxt.pro is not installed
-        """
+        """Initialize CCXT stream."""
         if not HAS_CCXT_PRO:
             raise ImportError(
                 "ccxt.pro not installed. Install with: pip install ccxt"
@@ -4825,14 +3410,12 @@ class CCXTOrderBookStream(_StreamBase):
                 with self._lock:
                     current = set(self._analyzers.keys())
 
-                # Start new symbol tasks
                 for s in current:
                     if s not in self._symbol_tasks or self._symbol_tasks[s].done():
                         self._symbol_tasks[s] = asyncio.create_task(
                             self._watch_symbol(s)
                         )
 
-                # Cancel removed symbol tasks
                 for s in list(self._symbol_tasks.keys()):
                     if s not in current:
                         self._symbol_tasks[s].cancel()
@@ -4845,7 +3428,6 @@ class CCXTOrderBookStream(_StreamBase):
                 await asyncio.sleep(0.1)
 
         finally:
-            # Cleanup
             for task in self._symbol_tasks.values():
                 task.cancel()
 
@@ -4880,7 +3462,6 @@ class CCXTOrderBookStream(_StreamBase):
                 self._update_health(symbol, connected=True)
                 self._process_snapshot(symbol, snapshot, timestamp)
 
-                # Rate limit
                 elapsed = time.time() - start
                 if elapsed < OrderBookConstants.CCXT_MIN_WATCH_INTERVAL:
                     await asyncio.sleep(
@@ -4937,16 +3518,7 @@ ALL_TRADING_SYMBOLS: Final[List[str]] = [
 # ============================================================
 
 class OrderBookManager:
-    """
-    High-level order book management.
-    
-    Provides:
-    - Unified interface for live and backtest modes
-    - Automatic stream selection (single vs multi-symbol)
-    - History storage with compression
-    - Validation and alerting
-    - Health monitoring
-    """
+    """High-level order book management."""
 
     def __init__(
         self,
@@ -4961,21 +3533,7 @@ class OrderBookManager:
         stale_data_ms: int = OrderBookConstants.STALE_DATA_MS,
         backtest_mode: bool = False
     ):
-        """
-        Initialize order book manager.
-        
-        Args:
-            exchange: Exchange identifier
-            use_ccxt_pro: Use CCXT Pro instead of native WebSocket
-            store_history: Enable history storage to disk
-            history_dir: Directory for history files
-            testnet: Use testnet endpoints
-            multi_symbol: Use multi-symbol stream (more efficient)
-            enable_validation: Enable data validation
-            enable_alerts: Enable alerting
-            stale_data_ms: Stale data threshold in ms
-            backtest_mode: Enable backtest mode (no live connections)
-        """
+        """Initialize order book manager."""
         self.exchange = exchange
         self.store_history = store_history
         self.backtest_mode = backtest_mode
@@ -4987,25 +3545,20 @@ class OrderBookManager:
         self._last_health_report = 0.0
         self._flush_executor: Optional[ThreadPoolExecutor] = None
 
-        # Setup history storage
         if store_history:
             self.history_dir.mkdir(exist_ok=True, parents=True)
             self._flush_executor = ThreadPoolExecutor(
                 max_workers=OrderBookConstants.MAX_FLUSH_THREADS
             )
 
-        # Setup validation
         self._validator = DataValidator() if enable_validation else None
 
-        # Setup alerts
         self._alerts = AlertManager() if enable_alerts else None
         if self._alerts:
             self._alerts.add_handler(console_alert_handler)
 
-        # Setup state
         self._state = StateManager()
 
-        # Setup stream or backtest provider
         self._stream: Optional[BaseOrderBookStream] = None
         self._backtest_provider: Optional[BacktestOrderBookProvider] = None
 
@@ -5050,7 +3603,6 @@ class OrderBookManager:
         self._state.set_running(True)
 
         if self._stream:
-            # Wrap callback to include our processing
             wrapped = lambda s: self._handle_snapshot(s, callback)
             self._stream.subscribe(symbol, wrapped)
 
@@ -5081,7 +3633,6 @@ class OrderBookManager:
         """Handle incoming snapshot with validation and storage."""
         symbol = snapshot.symbol
 
-        # Validate
         if self._validator:
             is_valid, warnings = self._validator.validate(snapshot)
 
@@ -5097,17 +3648,14 @@ class OrderBookManager:
             if not is_valid:
                 return
 
-        # Store history
         if self.store_history:
             self._buffer_snapshot(symbol, snapshot)
 
-        # Periodic health report
         now = time.time()
         if now - self._last_health_report >= OrderBookConstants.HEALTH_REPORT_INTERVAL:
             self._report_health()
             self._last_health_report = now
 
-        # User callback
         if user_callback:
             try:
                 user_callback(snapshot)
@@ -5172,7 +3720,6 @@ class OrderBookManager:
             logger.info(f"Saved {len(snapshots)} snapshots to {filename}")
         except Exception as e:
             logger.error(f"Failed to save history: {e}")
-            # Put snapshots back in buffer
             with self._lock:
                 existing = self._history_buffers.get(symbol, [])
                 self._history_buffers[symbol] = snapshots + existing
@@ -5183,7 +3730,6 @@ class OrderBookManager:
             self._backtest_provider.clear(symbol)
             return
 
-        # Flush remaining history
         if self.store_history and symbol in self._history_buffers:
             with self._lock:
                 buf = self._history_buffers.pop(symbol, [])
@@ -5192,10 +3738,6 @@ class OrderBookManager:
 
         if self._stream:
             self._stream.unsubscribe(symbol)
-
-    # ─────────────────────────────────────────────────────────
-    # BACKTEST METHODS
-    # ─────────────────────────────────────────────────────────
 
     def load_backtest_snapshots(
         self,
@@ -5249,10 +3791,6 @@ class OrderBookManager:
             return self._backtest_provider.get_snapshot_at_time(symbol, timestamp_ms)
         return self._backtest_provider.get_snapshot(symbol)
 
-    # ─────────────────────────────────────────────────────────
-    # DATA ACCESS
-    # ─────────────────────────────────────────────────────────
-
     def get_analyzer(self, symbol: str) -> Optional[OrderBookAnalyzer]:
         """Get analyzer for symbol."""
         if self.backtest_mode:
@@ -5293,12 +3831,7 @@ class OrderBookManager:
         self,
         symbols: List[str]
     ) -> Tuple[bool, List[str]]:
-        """
-        Check if all symbols are ready for trading.
-        
-        Returns:
-            Tuple of (is_ready, list_of_issues)
-        """
+        """Check if all symbols are ready for trading."""
         issues: List[str] = []
 
         for sym in symbols:
@@ -5337,7 +3870,6 @@ class OrderBookManager:
                         for d in pickle.load(fp)
                     ]
 
-                # Filter by time range
                 if start_time:
                     start_ms = int(start_time.timestamp() * 1000)
                     snaps = [s for s in snaps if s.timestamp >= start_ms]
@@ -5366,7 +3898,6 @@ class OrderBookManager:
         if hasattr(self._stream, 'get_pool_health'):
             return self._stream.get_pool_health()
 
-        # Fallback for streams without get_pool_health
         all_health = self._stream.get_all_health()
         if not all_health:
             return {"status": "no_connections", "total_symbols": 0}
@@ -5386,7 +3917,6 @@ class OrderBookManager:
         """Stop the manager and all streams."""
         self._state.set_running(False)
 
-        # Flush remaining history
         if self.store_history:
             with self._lock:
                 syms = list(self._history_buffers.keys())
@@ -5397,11 +3927,9 @@ class OrderBookManager:
                 if buf:
                     self._do_flush(sym, buf)
 
-        # Shutdown executor
         if self._flush_executor:
             self._flush_executor.shutdown(wait=True)
 
-        # Stop stream
         if self._stream:
             self._stream.stop()
 
@@ -5412,32 +3940,1001 @@ class OrderBookManager:
 # EXPORTS
 # ============================================================
 
+
+
+# ============================================================
+# === ORACLE OPTIMIZATIONS INSERTED ===
+# ============================================================
+# Added by oracle_patch_optimizations.sh
+# These optimizations provide 5-50x speedup for backtesting
+# ============================================================
+
+# ============================================================
+# NUMPY DEPENDENCY CHECK
+# ============================================================
+
+try:
+    import numpy as np
+    HAS_NUMPY = True
+except ImportError:
+    HAS_NUMPY = False
+    np = None
+
+try:
+    from numba import jit, prange
+    HAS_NUMBA = True
+except ImportError:
+    HAS_NUMBA = False
+    jit = None
+    prange = None
+
+
+# ============================================================
+# FAST BACKTEST ENGINE (NumPy Accelerated)
+# ============================================================
+
+class FastBacktestEngine:
+    """NumPy-accelerated backtest engine for maximum throughput.
+    
+    Provides 5-10x speedup over standard Python loops.
+    
+    Usage:
+        engine = FastBacktestEngine(seed=42)
+        results = engine.process_candle_batch(candles, ticks_by_candle)
+    """
+    
+    __slots__ = ('_rng', '_ob_cache', '_seed')
+    
+    def __init__(self, seed: int = 42):
+        """Initialize with optional random seed for reproducibility."""
+        if not HAS_NUMPY:
+            raise ImportError("NumPy required for FastBacktestEngine: pip install numpy")
+        self._seed = seed
+        self._rng = np.random.default_rng(seed)
+        self._ob_cache: Dict[int, 'OrderBookSnapshot'] = {}
+    
+    def reset(self) -> None:
+        """Reset RNG state for reproducible runs."""
+        self._rng = np.random.default_rng(self._seed)
+        self._ob_cache.clear()
+    
+    @staticmethod
+    def vectorized_tick_classify(prices: 'np.ndarray') -> 'np.ndarray':
+        """Vectorized tick classification - 10x faster than loop.
+        
+        Args:
+            prices: NumPy array of prices
+            
+        Returns:
+            Array of -1 (sell), 0 (unknown), 1 (buy)
+        """
+        if len(prices) < 2:
+            return np.zeros(len(prices), dtype=np.int8)
+        
+        # Calculate price changes
+        diff = np.diff(prices)
+        
+        # Classify: positive = buy, negative = sell
+        result = np.zeros(len(prices), dtype=np.int8)
+        result[1:] = np.sign(diff).astype(np.int8)
+        
+        # Forward-fill zeros (tick rule: use last direction)
+        mask = result == 0
+        idx = np.where(~mask, np.arange(len(result)), 0)
+        np.maximum.accumulate(idx, out=idx)
+        result = result[idx]
+        
+        return result
+    
+    @staticmethod
+    def vectorized_ofi(
+        prices: 'np.ndarray',
+        sizes: 'np.ndarray',
+        sides: 'np.ndarray'
+    ) -> Tuple[float, float, float]:
+        """Vectorized Order Flow Imbalance calculation.
+        
+        Args:
+            prices: Price array
+            sizes: Size array
+            sides: Side classification array (-1, 0, 1)
+            
+        Returns:
+            (cumulative_delta, buy_volume, sell_volume)
+        """
+        buy_mask = sides == 1
+        sell_mask = sides == -1
+        
+        buy_volume = float(np.sum(sizes[buy_mask]))
+        sell_volume = float(np.sum(sizes[sell_mask]))
+        cumulative_delta = buy_volume - sell_volume
+        
+        return cumulative_delta, buy_volume, sell_volume
+    
+    @staticmethod
+    def vectorized_vwap(prices: 'np.ndarray', sizes: 'np.ndarray') -> float:
+        """Vectorized VWAP calculation."""
+        total_size = np.sum(sizes)
+        if total_size == 0:
+            return float(prices[-1]) if len(prices) > 0 else 0.0
+        return float(np.sum(prices * sizes) / total_size)
+    
+    @staticmethod
+    def vectorized_volatility(prices: 'np.ndarray') -> float:
+        """Vectorized realized volatility (standard deviation of returns)."""
+        if len(prices) < 2:
+            return 0.0
+        returns = np.diff(np.log(prices))
+        return float(np.std(returns))
+    
+    def fast_synthetic_ob(
+        self,
+        last_price: float,
+        last_timestamp: int,
+        tick_imbalance: float = 0.0,
+        spread_bps: float = 5.0,
+        levels: int = 10,
+        base_size: float = 10.0,
+        volatility: float = 0.0
+    ) -> 'OrderBookSnapshot':
+        """Ultra-fast synthetic order book generation.
+        
+        ~5x faster than SyntheticOrderBook.from_ticks()
+        
+        Args:
+            last_price: Current price
+            last_timestamp: Timestamp in milliseconds
+            tick_imbalance: OFI imbalance (-1 to 1)
+            spread_bps: Spread in basis points
+            levels: Number of price levels
+            base_size: Base order size
+            volatility: Recent volatility (widens spread)
+            
+        Returns:
+            OrderBookSnapshot
+        """
+        # Adjust spread for volatility
+        vol_mult = 1.0 + min(volatility * 100, 2.0)
+        spread_pct = (spread_bps * vol_mult) / 10000
+        half_spread = last_price * spread_pct / 2
+        tick_size = last_price * 0.0001
+        
+        # Pre-generate all random values at once (faster than per-level)
+        jitters = self._rng.uniform(0.5, 1.5, levels * 2)
+        
+        # Imbalance multiplier affects size distribution
+        imb = 1 + np.clip(tick_imbalance, -1, 1) * 0.3
+        
+        # Exponential decay factors
+        decay = 0.7 ** np.arange(levels)
+        
+        # Calculate bid prices and sizes (vectorized)
+        bid_prices = last_price - half_spread - tick_size * np.arange(levels)
+        bid_sizes = base_size * decay * imb * jitters[:levels]
+        
+        # Calculate ask prices and sizes (vectorized)
+        ask_prices = last_price + half_spread + tick_size * np.arange(levels)
+        ask_sizes = base_size * decay * (2 - imb) * jitters[levels:]
+        
+        # Create levels directly (bypass validation for speed)
+        bids = []
+        asks = []
+        for i in range(levels):
+            bid = object.__new__(OrderBookLevel)
+            bid.price = float(bid_prices[i])
+            bid.size = max(0.001, float(bid_sizes[i]))
+            bids.append(bid)
+            
+            ask = object.__new__(OrderBookLevel)
+            ask.price = float(ask_prices[i])
+            ask.size = max(0.001, float(ask_sizes[i]))
+            asks.append(ask)
+        
+        # Create snapshot directly (bypass __post_init__ for speed)
+        snap = object.__new__(OrderBookSnapshot)
+        snap.symbol = "BACKTEST"
+        snap.timestamp = last_timestamp
+        snap.bids = bids
+        snap.asks = asks
+        snap.sequence = 0
+        snap.exchange = "synthetic_fast"
+        snap._sorted = True
+        
+        return snap
+    
+    def process_candle_batch(
+        self,
+        candles: List[Dict[str, Any]],
+        ticks_by_candle: Dict[int, List[Tuple[int, float, float]]],
+        compute_ob: bool = True,
+        ob_levels: int = 10
+    ) -> List[Dict[str, Any]]:
+        """Process multiple candles in optimized batch.
+        
+        Args:
+            candles: List of candle dicts with timestamp, open, high, low, close, volume
+            ticks_by_candle: Dict mapping candle timestamp to list of (ts, price, size) ticks
+            compute_ob: Whether to generate synthetic order books
+            ob_levels: Number of order book levels to generate
+            
+        Returns:
+            List of analysis results per candle
+        """
+        results = []
+        
+        for candle in candles:
+            ts = candle.get('timestamp', 0)
+            ticks = ticks_by_candle.get(ts, [])
+            
+            # Handle candles with no ticks
+            if not ticks:
+                results.append({
+                    'timestamp': ts,
+                    'close': candle.get('close', 0),
+                    'orderbook': None,
+                    'ofi': 0.0,
+                    'cumulative_delta': 0.0,
+                    'buy_volume': 0.0,
+                    'sell_volume': 0.0,
+                    'tick_count': 0,
+                    'vwap': candle.get('close', 0),
+                    'volatility': 0.0,
+                })
+                continue
+            
+            # Convert to numpy arrays (one-time cost)
+            tick_times = np.array([t[0] for t in ticks], dtype=np.int64)
+            tick_prices = np.array([t[1] for t in ticks], dtype=np.float64)
+            tick_sizes = np.array([t[2] for t in ticks], dtype=np.float64)
+            
+            # Vectorized calculations
+            sides = self.vectorized_tick_classify(tick_prices)
+            delta, buy_vol, sell_vol = self.vectorized_ofi(tick_prices, tick_sizes, sides)
+            vwap = self.vectorized_vwap(tick_prices, tick_sizes)
+            volatility = self.vectorized_volatility(tick_prices)
+            
+            # Calculate OFI
+            total_vol = buy_vol + sell_vol
+            ofi = (buy_vol - sell_vol) / total_vol if total_vol > 0 else 0.0
+            
+            # Fast order book generation (optional)
+            ob = None
+            if compute_ob:
+                ob = self.fast_synthetic_ob(
+                    last_price=float(tick_prices[-1]),
+                    last_timestamp=int(tick_times[-1]),
+                    tick_imbalance=ofi,
+                    volatility=volatility,
+                    levels=ob_levels,
+                )
+            
+            results.append({
+                'timestamp': ts,
+                'close': candle.get('close', 0),
+                'orderbook': ob,
+                'ofi': ofi,
+                'cumulative_delta': delta,
+                'buy_volume': buy_vol,
+                'sell_volume': sell_vol,
+                'tick_count': len(ticks),
+                'vwap': vwap,
+                'volatility': volatility,
+            })
+        
+        return results
+    
+    @staticmethod
+    def fast_market_impact(
+        ob: 'OrderBookSnapshot',
+        size: float,
+        side: str
+    ) -> float:
+        """Optimized market impact calculation.
+        
+        Args:
+            ob: Order book snapshot
+            size: Order size
+            side: 'buy' or 'sell'
+            
+        Returns:
+            Estimated fill price
+        """
+        if size <= 0 or not ob or not ob.is_valid:
+            return ob.mid_price if ob else 0.0
+        
+        levels = ob.asks if side == "buy" else ob.bids
+        remaining = size
+        total_cost = 0.0
+        
+        for level in levels:
+            if remaining <= 0:
+                break
+            fill = min(remaining, level.size)
+            total_cost += fill * level.price
+            remaining -= fill
+        
+        # Extrapolate for insufficient liquidity
+        if remaining > 0 and levels:
+            penalty = 1.02 if side == "buy" else 0.98
+            total_cost += remaining * levels[-1].price * penalty
+        
+        return total_cost / size if size > 0 else ob.mid_price
+
+
+# ============================================================
+# LOCK-FREE BACKTEST ANALYZER
+# ============================================================
+
+class BacktestAnalyzer:
+    """Lock-free analyzer optimized for single-threaded backtest.
+    
+    50% faster than OrderBookAnalyzer by removing thread safety overhead.
+    Use this for backtesting, use OrderBookAnalyzer for live trading.
+    
+    Usage:
+        analyzer = BacktestAnalyzer(max_snapshots=100)
+        analyzer.add(snapshot)
+        signal = analyzer.get_signal_strength()
+    """
+    
+    __slots__ = (
+        '_snapshots', '_max_size', '_stats_cache', '_stats_cache_key',
+        '_last_seq', '_seq_gaps', '_total'
+    )
+    
+    def __init__(self, max_snapshots: int = 100):
+        """Initialize analyzer.
+        
+        Args:
+            max_snapshots: Maximum snapshots to retain
+        """
+        self._snapshots: List['OrderBookSnapshot'] = []
+        self._max_size = max_snapshots
+        self._stats_cache: Optional[Dict[str, Any]] = None
+        self._stats_cache_key: int = 0
+        self._last_seq = 0
+        self._seq_gaps = 0
+        self._total = 0
+    
+    def add(self, snap: Optional['OrderBookSnapshot']) -> None:
+        """Add snapshot without locking overhead.
+        
+        Args:
+            snap: OrderBookSnapshot to add
+        """
+        if snap is None:
+            return
+        
+        # Track sequence gaps
+        if snap.sequence > 0:
+            if self._last_seq > 0 and snap.sequence > self._last_seq + 1:
+                self._seq_gaps += snap.sequence - self._last_seq - 1
+            self._last_seq = snap.sequence
+        
+        # Maintain max size (simple pop from front)
+        if len(self._snapshots) >= self._max_size:
+            self._snapshots.pop(0)
+        
+        self._snapshots.append(snap)
+        self._total += 1
+        self._stats_cache = None
+    
+    def add_snapshot(self, snap: Optional['OrderBookSnapshot']) -> None:
+        """Alias for add() - API compatibility with OrderBookAnalyzer."""
+        self.add(snap)
+    
+    def clear(self) -> None:
+        """Clear all snapshots and reset state."""
+        self._snapshots.clear()
+        self._last_seq = 0
+        self._seq_gaps = 0
+        self._total = 0
+        self._stats_cache = None
+    
+    @property
+    def current(self) -> Optional['OrderBookSnapshot']:
+        """Get most recent snapshot."""
+        return self._snapshots[-1] if self._snapshots else None
+    
+    @property
+    def count(self) -> int:
+        """Number of stored snapshots."""
+        return len(self._snapshots)
+    
+    @property
+    def is_empty(self) -> bool:
+        """Check if analyzer has no data."""
+        return len(self._snapshots) == 0
+    
+    @property
+    def total_updates(self) -> int:
+        """Total updates processed."""
+        return self._total
+    
+    @property
+    def sequence_gaps(self) -> int:
+        """Number of detected sequence gaps."""
+        return self._seq_gaps
+    
+    def get_recent(self, n: int = 10) -> List['OrderBookSnapshot']:
+        """Get recent snapshots efficiently.
+        
+        Args:
+            n: Number of recent snapshots
+            
+        Returns:
+            List of recent snapshots
+        """
+        if len(self._snapshots) <= n:
+            return list(self._snapshots)
+        return self._snapshots[-n:]
+    
+    def is_data_fresh(self, max_age_ms: int = 5000) -> bool:
+        """Check if data is recent enough.
+        
+        Args:
+            max_age_ms: Maximum acceptable age in milliseconds
+        """
+        current = self.current
+        return current is not None and not current.is_stale(max_age_ms)
+    
+    def average_spread_bps(self, window: int = 20) -> float:
+        """Average spread in basis points over window."""
+        snaps = self.get_recent(window)
+        spreads = [s.spread_bps for s in snaps if s.is_valid]
+        return sum(spreads) / len(spreads) if spreads else 0.0
+    
+    def average_imbalance(self, window: int = 20) -> float:
+        """Average imbalance over window."""
+        snaps = self.get_recent(window)
+        imbalances = [s.imbalance for s in snaps if s.is_valid]
+        return sum(imbalances) / len(imbalances) if imbalances else 0.0
+    
+    def imbalance_trend(self, window: int = 20) -> float:
+        """Calculate imbalance trend (slope) without locks.
+        
+        Args:
+            window: Number of snapshots for calculation
+            
+        Returns:
+            Trend slope (positive = increasingly bullish)
+        """
+        snaps = self.get_recent(window)
+        values = [s.imbalance for s in snaps if s.is_valid]
+        
+        n = len(values)
+        if n < 3:
+            return 0.0
+        
+        # Linear regression slope
+        sum_y = sum(values)
+        sum_xy = sum(i * v for i, v in enumerate(values))
+        
+        denom = n * (n * n - 1) / 12
+        if denom == 0:
+            return 0.0
+        
+        return (sum_xy - (n - 1) / 2 * sum_y) / denom
+    
+    def get_signal_strength(self) -> float:
+        """Get composite signal strength.
+        
+        Returns:
+            Signal from -1.0 (bearish) to 1.0 (bullish)
+        """
+        snap = self.current
+        if not snap or not snap.is_valid:
+            return 0.0
+        
+        signal = (
+            snap.imbalance * 0.4 +
+            snap.depth_imbalance(10) * 0.4 +
+            self.imbalance_trend() * 10.0 * 0.2
+        )
+        
+        return max(-1.0, min(1.0, signal))
+    
+    def is_bullish(self, imbalance_threshold: float = 0.2) -> bool:
+        """Check for bullish conditions."""
+        snap = self.current
+        if not snap or not snap.is_valid:
+            return False
+        return snap.imbalance > imbalance_threshold or self.imbalance_trend() > 0.005
+    
+    def is_bearish(self, imbalance_threshold: float = 0.2) -> bool:
+        """Check for bearish conditions."""
+        snap = self.current
+        if not snap or not snap.is_valid:
+            return False
+        return snap.imbalance < -imbalance_threshold or self.imbalance_trend() < -0.005
+    
+    def get_statistics(self, window: int = 20) -> Dict[str, Any]:
+        """Get comprehensive statistics with caching.
+        
+        Args:
+            window: Window size for calculations
+            
+        Returns:
+            Dictionary of statistics
+        """
+        cache_key = self._total
+        if self._stats_cache is not None and self._stats_cache_key == cache_key:
+            return self._stats_cache
+        
+        current = self.current
+        if not current or not current.is_valid:
+            return {}
+        
+        result = {
+            "mid_price": current.mid_price,
+            "spread_bps": current.spread_bps,
+            "imbalance": current.imbalance,
+            "depth_imbalance_10": current.depth_imbalance(10),
+            "avg_spread_bps": self.average_spread_bps(window),
+            "avg_imbalance": self.average_imbalance(window),
+            "imbalance_trend": self.imbalance_trend(window),
+            "signal_strength": self.get_signal_strength(),
+            "microprice": current.microprice(),
+            "snapshot_count": self.count,
+            "data_fresh": True,
+        }
+        
+        self._stats_cache = result
+        self._stats_cache_key = cache_key
+        
+        return result
+
+
+# ============================================================
+# PARALLEL BACKTESTER
+# ============================================================
+
+class ParallelBacktester:
+    """Multi-core backtest execution for maximum throughput.
+    
+    Distributes candle processing across CPU cores.
+    
+    Usage:
+        backtester = ParallelBacktester(n_workers=4)
+        results = backtester.run_parallel(candles, ticks, strategy_fn)
+    """
+    
+    def __init__(self, n_workers: Optional[int] = None, seed: int = 42):
+        """Initialize parallel backtester.
+        
+        Args:
+            n_workers: Number of worker processes (default: CPU cores - 1)
+            seed: Random seed for reproducibility
+        """
+        import multiprocessing as mp
+        self.n_workers = n_workers or max(1, mp.cpu_count() - 1)
+        self._seed = seed
+    
+    def run_parallel(
+        self,
+        candles: List[Dict[str, Any]],
+        ticks_by_candle: Dict[int, List[Tuple[int, float, float]]],
+        strategy_fn: Optional[Callable] = None,
+        chunk_size: int = 100,
+        compute_ob: bool = True
+    ) -> List[Dict[str, Any]]:
+        """Run backtest across multiple cores.
+        
+        Args:
+            candles: List of candle dictionaries
+            ticks_by_candle: Mapping of candle timestamp to tick list
+            strategy_fn: Optional strategy function(candle, ob, ofi) -> signal
+            chunk_size: Candles per worker chunk
+            compute_ob: Whether to generate order books
+            
+        Returns:
+            List of results per candle
+        """
+        from concurrent.futures import ProcessPoolExecutor
+        
+        # Split candles into chunks
+        chunks = []
+        for i in range(0, len(candles), chunk_size):
+            chunk_candles = candles[i:i + chunk_size]
+            chunk_ticks = {
+                c['timestamp']: ticks_by_candle.get(c['timestamp'], [])
+                for c in chunk_candles
+            }
+            chunks.append((chunk_candles, chunk_ticks))
+        
+        # Process chunks in parallel
+        all_results = []
+        
+        with ProcessPoolExecutor(max_workers=self.n_workers) as executor:
+            futures = [
+                executor.submit(
+                    _process_chunk_worker,
+                    chunk[0],
+                    chunk[1],
+                    self._seed + i,
+                    compute_ob
+                )
+                for i, chunk in enumerate(chunks)
+            ]
+            
+            for future in futures:
+                chunk_results = future.result()
+                all_results.extend(chunk_results)
+        
+        # Apply strategy if provided
+        if strategy_fn:
+            for result in all_results:
+                try:
+                    result['signal'] = strategy_fn(
+                        result.get('candle', {}),
+                        result.get('orderbook'),
+                        result.get('ofi', 0)
+                    )
+                except Exception as e:
+                    result['signal'] = None
+                    result['strategy_error'] = str(e)
+        
+        return all_results
+    
+    def run_sequential(
+        self,
+        candles: List[Dict[str, Any]],
+        ticks_by_candle: Dict[int, List[Tuple[int, float, float]]],
+        compute_ob: bool = True
+    ) -> List[Dict[str, Any]]:
+        """Run backtest on single core (for debugging or small datasets).
+        
+        Args:
+            candles: List of candle dictionaries
+            ticks_by_candle: Mapping of candle timestamp to tick list
+            compute_ob: Whether to generate order books
+            
+        Returns:
+            List of results per candle
+        """
+        engine = FastBacktestEngine(seed=self._seed)
+        results = engine.process_candle_batch(candles, ticks_by_candle, compute_ob)
+        
+        # Add candle reference to each result
+        for candle, result in zip(candles, results):
+            result['candle'] = candle
+        
+        return results
+
+
+def _process_chunk_worker(
+    candles: List[Dict],
+    ticks: Dict,
+    seed: int,
+    compute_ob: bool
+) -> List[Dict]:
+    """Worker function for parallel processing (must be top-level for pickling)."""
+    engine = FastBacktestEngine(seed=seed)
+    results = engine.process_candle_batch(candles, ticks, compute_ob)
+    
+    # Add candle reference
+    for candle, result in zip(candles, results):
+        result['candle'] = candle
+    
+    return results
+
+
+# ============================================================
+# MEMORY-MAPPED TICK STORAGE
+# ============================================================
+
+class MMapTickStore:
+    """Memory-mapped tick storage for large backtests.
+    
+    Handles millions of ticks without RAM pressure.
+    Data is stored on disk and accessed via memory mapping.
+    
+    Usage:
+        # Save ticks
+        store = MMapTickStore("btc_ticks.npy")
+        store.create(ticks)  # [(timestamp, price, size), ...]
+        
+        # Load and query
+        store.open()
+        range_ticks = store.get_range(start_ts, end_ts)
+        store.close()
+    """
+    
+    DTYPE = None  # Set dynamically when numpy available
+    
+    def __init__(self, filepath: str):
+        """Initialize tick store.
+        
+        Args:
+            filepath: Path to store file (.npy)
+        """
+        if not HAS_NUMPY:
+            raise ImportError("NumPy required for MMapTickStore: pip install numpy")
+        
+        # Set dtype
+        if MMapTickStore.DTYPE is None:
+            MMapTickStore.DTYPE = np.dtype([
+                ('timestamp', np.int64),
+                ('price', np.float64),
+                ('size', np.float64),
+            ])
+        
+        self.filepath = Path(filepath)
+        self._data: Optional[np.ndarray] = None
+    
+    def create(self, ticks: List[Tuple[int, float, float]]) -> None:
+        """Create memory-mapped file from tick list.
+        
+        Args:
+            ticks: List of (timestamp, price, size) tuples
+        """
+        # Sort by timestamp
+        sorted_ticks = sorted(ticks, key=lambda x: x[0])
+        
+        # Create structured array
+        arr = np.array(sorted_ticks, dtype=self.DTYPE)
+        
+        # Save to disk
+        np.save(str(self.filepath), arr)
+        
+        logger.info(f"Created tick store: {len(ticks)} ticks -> {self.filepath}")
+    
+    def create_from_trades(self, trades: List[Dict[str, Any]]) -> None:
+        """Create from list of trade dicts.
+        
+        Args:
+            trades: List of dicts with 'timestamp', 'price', 'amount' keys
+        """
+        ticks = [
+            (t['timestamp'], t['price'], t.get('amount', t.get('size', 0)))
+            for t in trades
+        ]
+        self.create(ticks)
+    
+    def open(self) -> 'np.ndarray':
+        """Open memory-mapped access.
+        
+        Returns:
+            NumPy array with memory-mapped data
+        """
+        if self._data is not None:
+            return self._data
+        
+        self._data = np.load(str(self.filepath), mmap_mode='r')
+        return self._data
+    
+    def close(self) -> None:
+        """Close memory map and free resources."""
+        self._data = None
+    
+    def __enter__(self) -> 'MMapTickStore':
+        """Context manager entry."""
+        self.open()
+        return self
+    
+    def __exit__(self, *args) -> None:
+        """Context manager exit."""
+        self.close()
+    
+    @property
+    def is_open(self) -> bool:
+        """Check if store is open."""
+        return self._data is not None
+    
+    def __len__(self) -> int:
+        """Get number of ticks."""
+        if self._data is None:
+            self.open()
+        return len(self._data)
+    
+    def get_range(self, start_ts: int, end_ts: int) -> 'np.ndarray':
+        """Get ticks in time range efficiently using binary search.
+        
+        Args:
+            start_ts: Start timestamp (inclusive)
+            end_ts: End timestamp (inclusive)
+            
+        Returns:
+            NumPy array slice of matching ticks
+        """
+        if self._data is None:
+            self.open()
+        
+        # Binary search for range bounds
+        start_idx = np.searchsorted(self._data['timestamp'], start_ts, side='left')
+        end_idx = np.searchsorted(self._data['timestamp'], end_ts, side='right')
+        
+        return self._data[start_idx:end_idx]
+    
+    def get_by_candle(
+        self,
+        candle_timestamps: List[int],
+        candle_duration_ms: int = 60000
+    ) -> Dict[int, 'np.ndarray']:
+        """Get ticks grouped by candle timestamp.
+        
+        Args:
+            candle_timestamps: List of candle start timestamps
+            candle_duration_ms: Duration of each candle in milliseconds
+            
+        Returns:
+            Dict mapping candle timestamp to tick array
+        """
+        if self._data is None:
+            self.open()
+        
+        result = {}
+        for ts in candle_timestamps:
+            result[ts] = self.get_range(ts, ts + candle_duration_ms - 1)
+        
+        return result
+    
+    def to_list(self, start_ts: int = 0, end_ts: int = None) -> List[Tuple[int, float, float]]:
+        """Convert range to list of tuples.
+        
+        Args:
+            start_ts: Start timestamp
+            end_ts: End timestamp (None = all)
+            
+        Returns:
+            List of (timestamp, price, size) tuples
+        """
+        if end_ts is None:
+            end_ts = int(time.time() * 1000) + 86400000  # Tomorrow
+        
+        data = self.get_range(start_ts, end_ts)
+        return [(int(t['timestamp']), float(t['price']), float(t['size'])) for t in data]
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get storage statistics.
+        
+        Returns:
+            Dict with tick count, time range, file size
+        """
+        if self._data is None:
+            self.open()
+        
+        return {
+            'tick_count': len(self._data),
+            'start_time': int(self._data['timestamp'][0]) if len(self._data) > 0 else 0,
+            'end_time': int(self._data['timestamp'][-1]) if len(self._data) > 0 else 0,
+            'file_size_mb': self.filepath.stat().st_size / 1024 / 1024,
+            'min_price': float(np.min(self._data['price'])) if len(self._data) > 0 else 0,
+            'max_price': float(np.max(self._data['price'])) if len(self._data) > 0 else 0,
+            'total_volume': float(np.sum(self._data['size'])) if len(self._data) > 0 else 0,
+        }
+
+
+# ============================================================
+# NUMBA JIT ACCELERATED FUNCTIONS (Optional)
+# ============================================================
+
+if HAS_NUMBA:
+    @jit(nopython=True, cache=True, parallel=True)
+    def numba_tick_classify(prices):
+        """Numba-accelerated tick classification - 50x faster.
+        
+        Args:
+            prices: NumPy float64 array of prices
+            
+        Returns:
+            int8 array of sides (-1, 0, 1)
+        """
+        n = len(prices)
+        result = np.zeros(n, dtype=np.int8)
+        
+        for i in prange(1, n):
+            if prices[i] > prices[i-1]:
+                result[i] = 1
+            elif prices[i] < prices[i-1]:
+                result[i] = -1
+            else:
+                result[i] = result[i-1] if i > 0 else 0
+        
+        return result
+    
+    @jit(nopython=True, cache=True)
+    def numba_ofi(prices, sizes):
+        """Numba-accelerated OFI calculation.
+        
+        Args:
+            prices: NumPy float64 array of prices
+            sizes: NumPy float64 array of sizes
+            
+        Returns:
+            (cumulative_delta, buy_volume, sell_volume)
+        """
+        n = len(prices)
+        buy_vol = 0.0
+        sell_vol = 0.0
+        last_dir = 0
+        
+        for i in range(1, n):
+            if prices[i] > prices[i-1]:
+                last_dir = 1
+            elif prices[i] < prices[i-1]:
+                last_dir = -1
+            
+            if last_dir == 1:
+                buy_vol += sizes[i]
+            elif last_dir == -1:
+                sell_vol += sizes[i]
+        
+        return buy_vol - sell_vol, buy_vol, sell_vol
+    
+    @jit(nopython=True, cache=True)
+    def numba_vwap(prices, sizes):
+        """Numba-accelerated VWAP calculation."""
+        total_size = 0.0
+        total_value = 0.0
+        
+        for i in range(len(prices)):
+            total_size += sizes[i]
+            total_value += prices[i] * sizes[i]
+        
+        if total_size == 0:
+            return prices[-1] if len(prices) > 0 else 0.0
+        
+        return total_value / total_size
+    
+    @jit(nopython=True, cache=True)
+    def numba_market_impact(
+        prices,
+        sizes,
+        order_size,
+        is_buy
+    ):
+        """Numba-accelerated market impact simulation.
+        
+        Args:
+            prices: Level prices (asks for buy, bids for sell)
+            sizes: Level sizes
+            order_size: Order size to simulate
+            is_buy: True for buy order
+            
+        Returns:
+            Average fill price
+        """
+        remaining = order_size
+        cost = 0.0
+        
+        for i in range(len(prices)):
+            if remaining <= 0:
+                break
+            fill = min(remaining, sizes[i])
+            cost += fill * prices[i]
+            remaining -= fill
+        
+        # Extrapolate if not fully filled
+        if remaining > 0 and len(prices) > 0:
+            penalty = 1.02 if is_buy else 0.98
+            cost += remaining * prices[-1] * penalty
+        
+        return cost / order_size if order_size > 0 else 0.0
+
+
+# ============================================================
+# END OF OPTIMIZATIONS
+# ============================================================
+
+
+# Updated __all__ with optimization classes
 __all__ = [
-    # Core Classes
+    # Original exports
     'OrderBookSnapshot',
     'OrderBookLevel',
     'OrderBookAnalyzer',
     'OrderBookManager',
-
-    # Stream Classes
     'BinanceOrderBookStream',
     'BinanceMultiStream',
     'CCXTOrderBookStream',
     'BaseOrderBookStream',
-
-    # Backtest Support
     'BacktestOrderBookProvider',
     'SyntheticOrderBook',
-
-    # Order Flow Analysis
     'OrderFlowMetrics',
     'OrderFlowTracker',
-
-    # Execution Simulation
     'SlippageEstimator',
     'BacktestExecutionSimulator',
-
-    # Support Classes
     'StreamHealth',
     'TradeSide',
     'AlertLevel',
@@ -5447,1266 +4944,17 @@ __all__ = [
     'ThrottledCallback',
     'OrderBookDeltaHandler',
     'TickClassifier',
-
-    # Constants
     'OrderBookConstants',
     'ALL_TRADING_SYMBOLS',
-
-    # Dependency Flags
     'HAS_WEBSOCKETS',
     'HAS_CCXT_PRO',
-
-    # Utility Functions
     '_now_ms',
+    
+    # New optimized components
+    'FastBacktestEngine',
+    'BacktestAnalyzer',
+    'ParallelBacktester',
+    'MMapTickStore',
+    'HAS_NUMPY',
+    'HAS_NUMBA',
 ]
-
-
-# ============================================================
-# TEST UTILITIES
-# ============================================================
-
-class TestRunner:
-    """Test utilities for running and reporting tests."""
-
-    @staticmethod
-    def run_test(name: str, test_fn: Callable[[], bool]) -> bool:
-        """Run a single test with error handling."""
-        try:
-            result = test_fn()
-            status = '✅ PASSED' if result else '❌ FAILED'
-            print(f"   {status}")
-            return result
-        except Exception as e:
-            print(f"   ❌ ERROR: {e}")
-            return False
-
-    @staticmethod
-    def timed_loop(
-        duration: int,
-        interval: float,
-        callback: Callable[[float], None]
-    ) -> None:
-        """Run a timed loop with periodic callbacks."""
-        start = time.time()
-        try:
-            while time.time() - start < duration:
-                callback(time.time() - start)
-                time.sleep(interval)
-        except KeyboardInterrupt:
-            print("\nInterrupted.")
-
-    @staticmethod
-    def print_header(title: str) -> None:
-        """Print a section header."""
-        print("\n" + "=" * 70)
-        print(f" {title}")
-        print("=" * 70)
-
-    @staticmethod
-    def print_summary(title: str, stats: Dict[str, Any]) -> None:
-        """Print a summary section."""
-        print("\n" + "-" * 70)
-        print(f" {title}")
-        print("-" * 70)
-        for k, v in stats.items():
-            print(f"   {k}: {v}")
-        print("-" * 70)
-
-
-# ============================================================
-# UNIT TESTS
-# ============================================================
-
-def test_order_book() -> bool:
-    """Run all unit tests."""
-    TestRunner.print_header("ORDER BOOK UNIT TESTS v4.2")
-
-    tests = [
-        ("OrderBookLevel", _test_level),
-        ("OrderBookSnapshot Basic", _test_snapshot_basic),
-        ("OrderBookSnapshot Metrics", _test_snapshot_metrics),
-        ("Market Impact", _test_market_impact),
-        ("Wall Detection", _test_walls),
-        ("OrderBookAnalyzer", _test_analyzer),
-        ("Analyzer Time Lookup", _test_analyzer_time_lookup),
-        ("Sequence Gaps", _test_sequence_gaps),
-        ("TickClassifier", _test_tick_classifier),
-        ("OrderFlowTracker", _test_order_flow_tracker),
-        ("SlippageEstimator", _test_slippage_estimator),
-        ("BacktestExecutionSimulator", _test_execution_simulator),
-        ("SyntheticOrderBook", _test_synthetic),
-        ("DataValidator", _test_validator),
-        ("AlertManager", _test_alerts),
-        ("StateManager", _test_state_manager),
-        ("ThrottledCallback", _test_throttled),
-        ("DeltaHandler", _test_delta_handler),
-        ("StreamHealth", _test_stream_health),
-        ("BacktestProvider", _test_backtest_provider),
-        ("Symbol Validation", _test_symbol_validation),
-        ("Edge Cases", _test_edge_cases),
-    ]
-
-    passed = 0
-    failed = 0
-
-    for name, fn in tests:
-        print(f"\n[TEST] {name}")
-        if TestRunner.run_test(name, fn):
-            passed += 1
-        else:
-            failed += 1
-
-    print(f"\n{'=' * 70}")
-    print(f" RESULTS: {passed} passed, {failed} failed")
-    print("=" * 70)
-
-    return failed == 0
-
-
-def _test_level() -> bool:
-    """Test OrderBookLevel creation and validation."""
-    # Basic creation
-    level = OrderBookLevel(100.0, 10.0)
-    assert level.price == 100.0, f"Expected price 100.0, got {level.price}"
-    assert level.size == 10.0, f"Expected size 10.0, got {level.size}"
-    assert level.value == 1000.0, f"Expected value 1000.0, got {level.value}"
-
-    # String conversion
-    level2 = OrderBookLevel("99.5", "5.5")
-    assert level2.price == 99.5, f"Expected price 99.5, got {level2.price}"
-
-    # Tuple export
-    tup = level.to_tuple()
-    assert tup == (100.0, 10.0), f"Expected (100.0, 10.0), got {tup}"
-
-    # Invalid price
-    try:
-        OrderBookLevel(-1, 10)
-        return False  # Should have raised
-    except ValueError:
-        pass
-
-    # Invalid size
-    try:
-        OrderBookLevel(100, -1)
-        return False  # Should have raised
-    except ValueError:
-        pass
-
-    return True
-
-
-def _test_snapshot_basic() -> bool:
-    """Test OrderBookSnapshot creation and basic properties."""
-    snap = OrderBookSnapshot.from_raw(
-        "BTC/USDT",
-        [(100, 10), (99, 20)],
-        [(101, 15), (102, 25)]
-    )
-
-    assert snap.is_valid, "Snapshot should be valid"
-    assert not snap.is_crossed, "Snapshot should not be crossed"
-    assert snap.best_bid == 100, f"Expected best_bid 100, got {snap.best_bid}"
-    assert snap.best_ask == 101, f"Expected best_ask 101, got {snap.best_ask}"
-
-    # Test serialization
-    data = snap.to_dict()
-    snap2 = OrderBookSnapshot.from_dict(data)
-    assert snap2.best_bid == snap.best_bid, "Deserialized bid mismatch"
-    assert snap2.best_ask == snap.best_ask, "Deserialized ask mismatch"
-
-    # Test from_sorted (faster path)
-    snap3 = OrderBookSnapshot.from_sorted(
-        "TEST/USDT",
-        [OrderBookLevel(100, 10)],
-        [OrderBookLevel(101, 15)]
-    )
-    assert snap3.is_valid, "from_sorted snapshot should be valid"
-
-    return True
-
-
-def _test_snapshot_metrics() -> bool:
-    """Test OrderBookSnapshot metrics calculations."""
-    snap = OrderBookSnapshot.from_raw(
-        "TEST/USDT",
-        [(100, 50), (99, 30)],
-        [(101, 25), (102, 35)]
-    )
-
-    # Mid price
-    assert snap.mid_price == 100.5, f"Expected mid 100.5, got {snap.mid_price}"
-
-    # Spread
-    assert snap.spread == 1.0, f"Expected spread 1.0, got {snap.spread}"
-
-    # Imbalance: (50 - 25) / (50 + 25) = 0.333...
-    expected_imb = (50 - 25) / (50 + 25)
-    assert abs(snap.imbalance - expected_imb) < 0.01, \
-        f"Expected imbalance ~{expected_imb:.3f}, got {snap.imbalance}"
-
-    # Microprice
-    mp = snap.microprice()
-    assert mp > 0, f"Microprice should be positive, got {mp}"
-
-    # VWAP
-    vwap_bid = snap.vwap_bid(2)
-    assert vwap_bid > 0, f"VWAP bid should be positive, got {vwap_bid}"
-
-    # Depth imbalance
-    depth_imb = snap.depth_imbalance(2)
-    assert -1 <= depth_imb <= 1, f"Depth imbalance out of range: {depth_imb}"
-
-    return True
-
-
-def _test_market_impact() -> bool:
-    """Test market impact calculation."""
-    snap = OrderBookSnapshot.from_raw(
-        "TEST/USDT",
-        [(100, 10), (99, 10), (98, 10)],
-        [(101, 10), (102, 10), (103, 10)]
-    )
-
-    # Small order - fills at best ask
-    impact_small = snap.market_impact(5, "buy")
-    assert impact_small == 101.0, \
-        f"Expected 101.0 for small buy, got {impact_small}"
-
-    # Larger order - walks the book
-    # 10 @ 101 + 5 @ 102 = 1010 + 510 = 1520, avg = 1520/15 = 101.33
-    impact_large = snap.market_impact(15, "buy")
-    expected = (10 * 101 + 5 * 102) / 15
-    assert abs(impact_large - expected) < 0.01, \
-        f"Expected ~{expected:.2f}, got {impact_large}"
-
-    # Sell side
-    impact_sell = snap.market_impact(5, "sell")
-    assert impact_sell == 100.0, \
-        f"Expected 100.0 for small sell, got {impact_sell}"
-
-    return True
-
-
-def _test_walls() -> bool:
-    """Test wall detection."""
-    snap = OrderBookSnapshot.from_raw(
-        "TEST/USDT",
-        [(100, 10), (99, 150), (98, 10)],   # Wall at 99
-        [(101, 10), (102, 200), (103, 10)]  # Wall at 102
-    )
-
-    # With threshold 2.5: avg_bid = 56.67, threshold = 141.67
-    # 150 >= 141.67 ✓
-    walls = snap.find_walls(threshold_mult=2.5)
-
-    assert len(walls["bid_walls"]) >= 1, \
-        f"Expected bid wall, got {walls['bid_walls']}"
-    assert any(w.price == 99 for w in walls["bid_walls"]), \
-        f"Expected wall at 99, got {[w.price for w in walls['bid_walls']]}"
-
-    assert len(walls["ask_walls"]) >= 1, \
-        f"Expected ask wall, got {walls['ask_walls']}"
-    assert any(w.price == 102 for w in walls["ask_walls"]), \
-        f"Expected wall at 102, got {[w.price for w in walls['ask_walls']]}"
-
-    # Test nearest wall functions
-    nearest_bid = snap.nearest_bid_wall(threshold_mult=2.5)
-    assert nearest_bid is not None, "Expected nearest bid wall"
-
-    nearest_ask = snap.nearest_ask_wall(threshold_mult=2.5)
-    assert nearest_ask is not None, "Expected nearest ask wall"
-
-    return True
-
-
-def _test_analyzer() -> bool:
-    """Test OrderBookAnalyzer functionality."""
-    analyzer = OrderBookAnalyzer(max_snapshots=50)
-    base_time = _now_ms()
-
-    # Add snapshots with increasing bid size (bullish trend)
-    for i in range(20):
-        snap = OrderBookSnapshot.from_raw(
-            "TEST/USDT",
-            [(100, 10 + i * 2)],  # Bid size increases
-            [(101, 10)],
-            timestamp=base_time + i * 100,
-            sequence=i + 1
-        )
-        analyzer.add_snapshot(snap)
-
-    assert analyzer.count == 20, f"Expected 20 snapshots, got {analyzer.count}"
-    assert analyzer.total_updates == 20, \
-        f"Expected 20 updates, got {analyzer.total_updates}"
-
-    # Check trend (should be positive/bullish)
-    trend = analyzer.imbalance_trend()
-    assert trend > 0, f"Expected positive trend, got {trend}"
-
-    # Should detect bullish condition
-    assert analyzer.is_bullish(), "Expected bullish condition"
-
-    # Statistics should be cached
-    stats1 = analyzer.get_statistics()
-    stats2 = analyzer.get_statistics()
-    assert "signal_strength" in stats1, "Expected signal_strength in stats"
-    assert stats1 == stats2, "Cached stats should be equal"
-
-    return True
-
-
-def _test_analyzer_time_lookup() -> bool:
-    """Test OrderBookAnalyzer time-based lookup."""
-    analyzer = OrderBookAnalyzer(max_snapshots=100)
-
-    # Add snapshots at known times
-    times = [1000, 2000, 3000, 4000, 5000]
-    for t in times:
-        snap = OrderBookSnapshot.from_raw(
-            "TEST/USDT",
-            [(100, 10)],
-            [(101, 10)],
-            timestamp=t
-        )
-        analyzer.add_snapshot(snap)
-
-    # Exact match
-    result = analyzer.get_snapshot_at_time(3000)
-    assert result is not None, "Expected snapshot at 3000"
-    assert result.timestamp == 3000, f"Expected timestamp 3000, got {result.timestamp}"
-
-    # Before first
-    result = analyzer.get_snapshot_at_time(500)
-    assert result is None, "Expected None before first snapshot"
-
-    # Between snapshots
-    result = analyzer.get_snapshot_at_time(2500)
-    assert result is not None, "Expected snapshot at or before 2500"
-    assert result.timestamp == 2000, f"Expected timestamp 2000, got {result.timestamp}"
-
-    # After last
-    result = analyzer.get_snapshot_at_time(6000)
-    assert result is not None, "Expected snapshot at or before 6000"
-    assert result.timestamp == 5000, f"Expected timestamp 5000, got {result.timestamp}"
-
-    return True
-
-
-def _test_sequence_gaps() -> bool:
-    """Test sequence gap detection."""
-    analyzer = OrderBookAnalyzer()
-
-    # Add snapshots with gaps: 1, 2, 5, 6, 10
-    # Gaps: 3-4 (2 missing), 7-9 (3 missing) = 5 total
-    for seq in [1, 2, 5, 6, 10]:
-        snap = OrderBookSnapshot.from_raw(
-            "T/U",
-            [(100, 10)],
-            [(101, 10)],
-            sequence=seq
-        )
-        analyzer.add_snapshot(snap)
-
-    assert analyzer.sequence_gaps == 5, \
-        f"Expected 5 sequence gaps, got {analyzer.sequence_gaps}"
-
-    return True
-
-
-def _test_tick_classifier() -> bool:
-    """Test tick classification."""
-    classifier = TickClassifier()
-
-    prices = [100.0, 100.1, 100.2, 100.2, 100.1]
-    results = classifier.classify_batch(prices)
-
-    expected = [
-        TradeSide.UNKNOWN,  # First tick
-        TradeSide.BUY,      # Uptick
-        TradeSide.BUY,      # Uptick
-        TradeSide.BUY,      # Same price, keep last (BUY)
-        TradeSide.SELL,     # Downtick
-    ]
-
-    assert results == expected, f"Expected {expected}, got {results}"
-
-    # Test reset
-    classifier.reset()
-    result = classifier.classify(100.0)
-    assert result == TradeSide.UNKNOWN, "After reset, first tick should be UNKNOWN"
-
-    return True
-
-
-def _test_order_flow_tracker() -> bool:
-    """Test OrderFlowTracker functionality."""
-    tracker = OrderFlowTracker(large_trade_threshold=5.0)
-
-    # Process trades
-    tracker.process_trade(100.0, 1.0)   # Unknown (first)
-    tracker.process_trade(100.1, 2.0)   # Buy (uptick)
-    tracker.process_trade(100.2, 3.0)   # Buy (uptick)
-    tracker.process_trade(100.1, 1.5)   # Sell (downtick)
-    tracker.process_trade(100.0, 10.0)  # Sell (downtick, large)
-
-    metrics = tracker.get_metrics()
-
-    # Verify counts
-    assert metrics.trade_count == 4, \
-        f"Expected 4 classified trades, got {metrics.trade_count}"
-    assert metrics.unknown_count == 1, \
-        f"Expected 1 unknown, got {metrics.unknown_count}"
-    assert metrics.total_trade_count == 5, \
-        f"Expected 5 total trades, got {metrics.total_trade_count}"
-
-    # Verify volumes
-    assert metrics.buy_volume > 0, \
-        f"Expected buy_volume > 0, got {metrics.buy_volume}"
-    assert metrics.sell_volume > 0, \
-        f"Expected sell_volume > 0, got {metrics.sell_volume}"
-
-    # Verify large trade count
-    assert metrics.large_sell_count == 1, \
-        f"Expected 1 large sell, got {metrics.large_sell_count}"
-
-    # Verify OFI in range
-    ofi = metrics.ofi
-    assert -1.0 <= ofi <= 1.0, f"OFI out of range: {ofi}"
-
-    # Verify classification rate
-    rate = metrics.classification_rate
-    assert rate == 0.8, f"Expected 80% classification rate, got {rate}"
-
-    # Test batch processing
-    tracker.reset()
-    trades = [(100.0, 1.0), (100.1, 2.0), (99.9, 3.0)]
-    batch_metrics = tracker.process_batch(trades)
-    assert batch_metrics.total_trade_count == 3, \
-        f"Expected 3 trades after batch, got {batch_metrics.total_trade_count}"
-
-    return True
-
-
-def _test_slippage_estimator() -> bool:
-    """Test SlippageEstimator functionality."""
-    snap = OrderBookSnapshot.from_raw(
-        "TEST/USDT",
-        [(100, 10), (99, 20), (98, 30)],
-        [(101, 10), (102, 20), (103, 30)]
-    )
-
-    # Test estimate
-    price, slippage, fill_prob = SlippageEstimator.estimate(
-        snap, 5, "buy", aggression=1.0
-    )
-    assert price > 0, f"Expected price > 0, got {price}"
-    assert slippage >= 0, f"Expected slippage >= 0, got {slippage}"
-    assert 0 <= fill_prob <= 1, f"Fill probability out of range: {fill_prob}"
-
-    # Test fixed slippage
-    fixed_buy = SlippageEstimator.estimate_fixed(100.0, "buy", 5.0)
-    assert fixed_buy > 100.0, f"Expected buy price > 100, got {fixed_buy}"
-    assert abs(fixed_buy - 100.05) < 0.001, \
-        f"Expected ~100.05, got {fixed_buy}"
-
-    fixed_sell = SlippageEstimator.estimate_fixed(100.0, "sell", 5.0)
-    assert fixed_sell < 100.0, f"Expected sell price < 100, got {fixed_sell}"
-
-    # Test simulate_fill
-    result = SlippageEstimator.simulate_fill(snap, 5, "buy", max_slippage_bps=50.0)
-    assert result is not None, "Expected successful fill"
-    fill_price, filled_size = result
-    assert fill_price > 0, f"Expected fill_price > 0, got {fill_price}"
-    assert filled_size > 0, f"Expected filled_size > 0, got {filled_size}"
-
-    # Test with insufficient slippage limit
-    result = SlippageEstimator.simulate_fill(snap, 100, "buy", max_slippage_bps=0.1)
-    # Should fail or partially fill due to tight limit
-
-    # Test market impact calculation
-    impact = SlippageEstimator.calculate_market_impact_cost(snap, 15, "buy")
-    assert "slippage_bps" in impact, "Expected slippage_bps in impact"
-    assert impact["slippage_bps"] >= 0, "Slippage should be non-negative"
-
-    return True
-
-
-def _test_execution_simulator() -> bool:
-    """Test BacktestExecutionSimulator functionality."""
-    snap = OrderBookSnapshot.from_raw(
-        "TEST/USDT",
-        [(100, 10), (99, 20)],
-        [(101, 10), (102, 20)]
-    )
-
-    # Test with fixed slippage model
-    sim_fixed = BacktestExecutionSimulator(
-        slippage_model="fixed",
-        fixed_slippage_bps=2.0,
-        fee_bps=4.0
-    )
-
-    entry_fixed = sim_fixed.simulate_entry(100.5, 1.0, "buy")
-    assert entry_fixed["fill_price"] > 100.5, \
-        f"Expected slippage on buy, got {entry_fixed['fill_price']}"
-    assert entry_fixed["fee"] > 0, \
-        f"Expected fee > 0, got {entry_fixed['fee']}"
-    assert entry_fixed["total_outlay"] > 0, \
-        f"Expected total_outlay > 0 for buy"
-
-    # Test with realistic model
-    sim_real = BacktestExecutionSimulator(
-        slippage_model="realistic",
-        fee_bps=4.0
-    )
-    entry_real = sim_real.simulate_entry(100.5, 1.0, "buy", orderbook=snap)
-    assert entry_real["fill_price"] > 0, "Expected valid fill price"
-
-    # Test round trip
-    result = sim_fixed.simulate_round_trip(100.5, 105.0, 1.0, "buy")
-    assert "net_pnl" in result, "Expected net_pnl in result"
-    assert "return_pct" in result, "Expected return_pct in result"
-    assert result["gross_pnl"] > 0, \
-        f"Expected profit on 100.5 -> 105, got {result['gross_pnl']}"
-
-    # Test sell side
-    entry_sell = sim_fixed.simulate_entry(100.5, 1.0, "sell")
-    assert entry_sell["net_proceeds"] > 0, \
-        "Expected net_proceeds > 0 for sell"
-
-    # Test statistics
-    stats = sim_fixed.get_statistics()
-    assert stats["trade_count"] >= 2, \
-        f"Expected at least 2 trades, got {stats['trade_count']}"
-
-    # Test invalid inputs
-    try:
-        BacktestExecutionSimulator(slippage_model="invalid")
-        return False  # Should have raised
-    except ValueError:
-        pass
-
-    return True
-
-
-def _test_synthetic() -> bool:
-    """Test SyntheticOrderBook generation."""
-    ticks = [(i * 1000, 100.0 + (i % 10) * 0.01) for i in range(100)]
-
-    # Test from_ticks with reproducibility
-    snap1 = SyntheticOrderBook.from_ticks(ticks, spread_bps=10, random_seed=42)
-    snap2 = SyntheticOrderBook.from_ticks(ticks, spread_bps=10, random_seed=42)
-
-    assert snap1 is not None, "Expected snapshot from ticks"
-    assert snap2 is not None, "Expected snapshot from ticks"
-    assert snap1.best_bid == snap2.best_bid, "Same seed should produce same results"
-
-    # Test from_candle
-    snap_candle = SyntheticOrderBook.from_candle(
-        timestamp=1000,
-        open_price=100.0,
-        high_price=101.0,
-        low_price=99.0,
-        close_price=100.5,
-        volume=1000,
-        random_seed=42
-    )
-    assert snap_candle.is_valid, "Candle snapshot should be valid"
-
-    # Test generate_analyzer
-    analyzer = SyntheticOrderBook.generate_analyzer(ticks, sample_every=10)
-    assert analyzer is not None, "Expected analyzer from ticks"
-    assert analyzer.count == 10, f"Expected 10 snapshots, got {analyzer.count}"
-
-    # Test with tick sizes
-    tick_sizes = [random.uniform(0.1, 2.0) for _ in range(100)]
-    snap_with_sizes = SyntheticOrderBook.from_ticks(
-        ticks,
-        tick_sizes=tick_sizes,
-        random_seed=42
-    )
-    assert snap_with_sizes is not None, "Expected snapshot with tick sizes"
-
-    return True
-
-
-def _test_validator() -> bool:
-    """Test DataValidator functionality."""
-    validator = DataValidator(max_symbols=10)
-
-    # Valid snapshot
-    valid_snap = OrderBookSnapshot.from_raw(
-        "T/U",
-        [(100, 10)],
-        [(101, 10)]
-    )
-    is_valid, warnings = validator.validate(valid_snap)
-    assert is_valid, "Expected valid snapshot to pass"
-
-    # Crossed book
-    crossed_snap = OrderBookSnapshot.from_raw(
-        "T/U",
-        [(102, 10)],
-        [(101, 10)]
-    )
-    is_valid, warnings = validator.validate(crossed_snap)
-    assert not is_valid, "Expected crossed book to fail"
-
-    # Empty book
-    empty_snap = OrderBookSnapshot.from_raw("T/U", [], [])
-    is_valid, warnings = validator.validate(empty_snap)
-    assert not is_valid, "Expected empty book to fail"
-
-    # Test reset
-    validator.reset("T/U")
-    stats = validator.get_stats()
-    assert stats["tracked_symbols"] == 0, "Expected 0 symbols after reset"
-
-    return True
-
-
-def _test_alerts() -> bool:
-    """Test AlertManager functionality."""
-    alerts = AlertManager(throttle_seconds=1)
-    received: List[Tuple[str, str]] = []
-
-    def handler(level: str, message: str, context: Dict[str, Any]) -> None:
-        received.append((level, message))
-
-    alerts.add_handler(handler)
-
-    # First alert should go through
-    r1 = alerts.warning("Test", throttle_key="t1")
-    assert r1, "First alert should not be throttled"
-
-    # Critical without throttle key
-    alerts.critical("Critical")
-
-    # Same throttle key should be throttled
-    r2 = alerts.warning("Test", throttle_key="t1")
-    assert not r2, "Second alert with same key should be throttled"
-
-    # Verify received
-    assert len(received) == 2, f"Expected 2 alerts, got {len(received)}"
-
-    # Test clear throttle
-    alerts.clear_throttle()
-    r3 = alerts.warning("Test", throttle_key="t1")
-    assert r3, "Alert after clear should not be throttled"
-
-    return True
-
-
-def _test_state_manager() -> bool:
-    """Test StateManager functionality."""
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        sf = os.path.join(tmpdir, "test.json")
-
-        # Create and save state
-        s1 = StateManager(sf)
-        s1.set("key", "val")
-        s1.update_positions({"BTC/USDT": 0.5})
-
-        # Load state in new instance
-        s2 = StateManager(sf)
-        assert s2.get("key") == "val", "Expected persisted value"
-
-        positions = s2.get_positions()
-        assert positions.get("BTC/USDT") == 0.5, "Expected persisted position"
-
-        # Test running state
-        s2.set_running(True)
-        assert s2.was_running(), "Expected running state"
-
-        # Test clear
-        s2.clear()
-        assert s2.get("key") is None, "Expected cleared state"
-
-    return True
-
-
-def _test_throttled() -> bool:
-    """Test ThrottledCallback functionality."""
-    count = [0]
-
-    def callback(data: Any) -> None:
-        count[0] += 1
-
-    tc = ThrottledCallback(callback, min_interval_ms=100)
-
-    # Rapid calls should be throttled
-    for i in range(10):
-        tc(i)
-
-    assert count[0] == 1, f"Expected 1 call after rapid fire, got {count[0]}"
-
-    # Wait and call again
-    time.sleep(0.15)
-    tc(99)
-
-    assert count[0] == 2, f"Expected 2 calls after delay, got {count[0]}"
-
-    # Test flush
-    tc(100)  # This gets stored as pending
-    tc.flush()
-
-    assert count[0] == 3, f"Expected 3 calls after flush, got {count[0]}"
-
-    return True
-
-
-def _test_delta_handler() -> bool:
-    """Test OrderBookDeltaHandler functionality."""
-    handler = OrderBookDeltaHandler("T/U")
-
-    # Apply snapshot
-    handler.apply_snapshot(
-        [(100, 10), (99, 20)],
-        [(101, 15), (102, 25)],
-        update_id=1
-    )
-
-    s1 = handler.get_snapshot()
-    assert s1 is not None, "Expected snapshot after apply"
-    assert s1.best_bid == 100, f"Expected best_bid 100, got {s1.best_bid}"
-
-    # Apply delta - remove price 100, add price 98
-    s2 = handler.apply_delta(
-        [(100, 0), (98, 30)],  # Remove 100, add 98
-        [(101, 20)],          # Update 101
-        update_id=2
-    )
-
-    assert s2 is not None, "Expected snapshot after delta"
-    assert s2.best_bid == 99, f"Expected best_bid 99, got {s2.best_bid}"
-
-    # Stale update should return None
-    s3 = handler.apply_delta([(97, 10)], [], update_id=1)
-    assert s3 is None, "Expected None for stale update"
-
-    # Test reset
-    handler.reset()
-    s4 = handler.get_snapshot()
-    assert s4 is None, "Expected None after reset"
-
-    return True
-
-
-def _test_stream_health() -> bool:
-    """Test StreamHealth functionality."""
-    h = StreamHealth()
-
-    # Initially unhealthy
-    assert not h.is_healthy, "New health should not be healthy"
-
-    # Make healthy
-    h.connected = True
-    h.last_update_ms = _now_ms()
-    h.latency_ms = 50
-
-    assert h.is_healthy, "Should be healthy now"
-
-    # Record errors
-    for _ in range(15):
-        h.record_error("test error")
-
-    assert not h.is_healthy, "Should be unhealthy after many errors"
-    assert h.error_count == 15, f"Expected 15 errors, got {h.error_count}"
-
-    # Reset errors
-    h.reset_errors()
-    assert h.is_healthy, "Should be healthy after reset"
-
-    # Test to_dict
-    d = h.to_dict()
-    assert "connected" in d, "Expected connected in dict"
-    assert "is_healthy" in d, "Expected is_healthy in dict"
-
-    return True
-
-
-def _test_backtest_provider() -> bool:
-    """Test BacktestOrderBookProvider functionality."""
-    provider = BacktestOrderBookProvider()
-
-    # Load candles
-    candles = [
-        {
-            "timestamp": i * 60000,
-            "open": 100,
-            "high": 101,
-            "low": 99,
-            "close": 100,
-            "volume": 1000
-        }
-        for i in range(10)
-    ]
-    provider.load_from_candles("BTC/USDT", candles)
-
-    # Check analyzer
-    analyzer = provider.get_analyzer("BTC/USDT")
-    assert analyzer is not None, "Expected analyzer"
-    assert analyzer.count == 10, f"Expected 10 snapshots, got {analyzer.count}"
-
-    # Check snapshot
-    snap = provider.get_snapshot("BTC/USDT")
-    assert snap is not None, "Expected snapshot"
-
-    # Check time-based lookup
-    snap_at_time = provider.get_snapshot_at_time("BTC/USDT", 5 * 60000)
-    assert snap_at_time is not None, "Expected snapshot at time"
-    assert snap_at_time.timestamp <= 5 * 60000, "Snapshot should be at or before time"
-
-    # Check symbols list
-    symbols = provider.get_all_symbols()
-    assert "BTC/USDT" in symbols, "Expected BTC/USDT in symbols"
-
-    # Test clear
-    provider.clear("BTC/USDT")
-    assert provider.get_analyzer("BTC/USDT") is None, "Expected None after clear"
-
-    return True
-
-
-def _test_symbol_validation() -> bool:
-    """Test symbol validation pattern."""
-    valid = ["BTC/USDT", "ETH/BTC", "1INCH/USDT", "XRP/USDT"]
-    invalid = ["btc/usdt", "BTC-USDT", "BTC", "BTC/", "/USDT"]
-
-    for s in valid:
-        if not OrderBookConstants.SYMBOL_PATTERN.match(s):
-            print(f"   Expected {s} to be valid")
-            return False
-
-    for s in invalid:
-        if OrderBookConstants.SYMBOL_PATTERN.match(s):
-            print(f"   Expected {s} to be invalid")
-            return False
-
-    return True
-
-
-def _test_edge_cases() -> bool:
-    """Test edge cases and error handling."""
-    # Empty book
-    empty = OrderBookSnapshot.from_raw("T/U", [], [])
-    assert not empty.is_valid, "Empty book should be invalid"
-    assert empty.mid_price == 0.0, "Empty book mid should be 0"
-    assert empty.spread == 0.0, "Empty book spread should be 0"
-
-    # Crossed book
-    crossed = OrderBookSnapshot.from_raw("T/U", [(102, 10)], [(101, 10)])
-    assert crossed.is_crossed, "Should detect crossed book"
-
-    # Stale data
-    old_ts = _now_ms() - 10000
-    stale = OrderBookSnapshot.from_raw(
-        "T/U",
-        [(100, 10)],
-        [(101, 10)],
-        timestamp=old_ts
-    )
-    assert stale.is_stale(5000), "Should detect stale data"
-
-    # Market impact with zero size
-    snap = OrderBookSnapshot.from_raw("T/U", [(100, 10)], [(101, 10)])
-    impact = snap.market_impact(0, "buy")
-    assert impact == snap.mid_price, "Zero size should return mid price"
-
-    # Market impact with empty book
-    impact_empty = empty.market_impact(1, "buy")
-    assert impact_empty == 0.0, "Empty book impact should be 0"
-
-    return True
-
-
-# ============================================================
-# LIVE TESTS
-# ============================================================
-
-def test_live_stream(duration: int = 30) -> bool:
-    """Test live WebSocket streaming."""
-    if not HAS_WEBSOCKETS:
-        print("❌ websockets not installed")
-        return False
-
-    TestRunner.print_header(f"LIVE STREAM TEST ({duration}s)")
-
-    manager = OrderBookManager(store_history=False, enable_alerts=True)
-    stats: Dict[str, Any] = {"count": 0, "spreads": [], "imbalances": []}
-
-    def on_update(s: OrderBookSnapshot) -> None:
-        stats["count"] += 1
-        if s.is_valid:
-            stats["spreads"].append(s.spread)
-            stats["imbalances"].append(s.imbalance)
-
-        if stats["count"] % 10 == 0:
-            h = manager.get_health("BTC/USDT")
-            if s.is_valid and h:
-                print(
-                    f"[{stats['count']:4d}] "
-                    f"Mid: ${s.mid_price:,.2f} | "
-                    f"Spread: {s.spread_bps:.3f}bps | "
-                    f"Imb: {s.imbalance:+.3f} | "
-                    f"Lat: {h.latency_ms:.0f}ms"
-                )
-
-    manager.subscribe("BTC/USDT", on_update)
-    TestRunner.timed_loop(duration, 1, lambda _: None)
-    health = manager.get_health("BTC/USDT")
-    manager.stop()
-
-    TestRunner.print_summary("LIVE TEST SUMMARY", {
-        "Updates": f"{stats['count']} ({stats['count']/max(1,duration):.1f}/sec)",
-        "Spread range": (
-            f"${min(stats['spreads']):.2f} - ${max(stats['spreads']):.2f}"
-            if stats['spreads'] else "N/A"
-        ),
-        "Avg imbalance": (
-            f"{sum(stats['imbalances'])/len(stats['imbalances']):+.3f}"
-            if stats['imbalances'] else "N/A"
-        ),
-        "Health": "✅" if health and health.is_healthy else "⚠️",
-        "Latency": f"{health.latency_ms:.1f}ms" if health else "N/A",
-    })
-
-    success = stats["count"] > 0
-    print(f" {'✅ PASSED' if success else '❌ FAILED'}")
-    return success
-
-
-def test_multi_symbol(duration: int = 30, num_pairs: int = 10) -> bool:
-    """Test multi-symbol WebSocket streaming."""
-    if not HAS_WEBSOCKETS:
-        print("❌ websockets not installed")
-        return False
-
-    TestRunner.print_header(f"MULTI-SYMBOL TEST ({num_pairs} pairs, {duration}s)")
-
-    symbols = ALL_TRADING_SYMBOLS[:num_pairs]
-    manager = OrderBookManager(multi_symbol=True, store_history=False)
-    counts: Dict[str, int] = {s: 0 for s in symbols}
-
-    def on_update(s: OrderBookSnapshot) -> None:
-        counts[s.symbol] = counts.get(s.symbol, 0) + 1
-
-    manager.subscribe_many(symbols, on_update)
-
-    def report(elapsed: float) -> None:
-        h = manager.get_health_report()
-        total = sum(counts.values())
-        active = sum(1 for c in counts.values() if c > 0)
-        print(
-            f"   [{elapsed:5.0f}s] "
-            f"Updates: {total:5d} ({total/max(1,elapsed):6.1f}/s) | "
-            f"Active: {active}/{len(symbols)} | "
-            f"Healthy: {h.get('healthy_count', 0)}"
-        )
-
-    TestRunner.timed_loop(duration, 5, report)
-    manager.stop()
-
-    total = sum(counts.values())
-    TestRunner.print_summary("MULTI-SYMBOL SUMMARY", {
-        "Symbols": len(symbols),
-        "Total updates": total,
-        "Rate": f"{total/max(1,duration):.1f}/sec",
-        "Top 5": ", ".join(
-            f"{s}:{c}" for s, c in
-            sorted(counts.items(), key=lambda x: -x[1])[:5]
-        ),
-    })
-
-    success = total > len(symbols) * 3
-    print(f" {'✅ PASSED' if success else '❌ FAILED'}")
-    return success
-
-
-def test_stress(duration: int = 60) -> bool:
-    """Stress test with maximum symbols."""
-    if not HAS_WEBSOCKETS:
-        print("❌ websockets not installed")
-        return False
-
-    TestRunner.print_header(f"STRESS TEST ({duration}s)")
-
-    manager = OrderBookManager(multi_symbol=True, store_history=False)
-    max_symbols = min(len(ALL_TRADING_SYMBOLS), manager._stream.max_capacity)
-    symbols = ALL_TRADING_SYMBOLS[:max_symbols]
-    counts: Dict[str, int] = {s: 0 for s in symbols}
-
-    print(f" Capacity: {manager._stream.max_capacity}, Testing: {len(symbols)} symbols")
-
-    def on_update(s: OrderBookSnapshot) -> None:
-        counts[s.symbol] = counts.get(s.symbol, 0) + 1
-
-    manager.subscribe_many(symbols, on_update)
-
-    def report(elapsed: float) -> None:
-        active = sum(1 for c in counts.values() if c > 0)
-        total = sum(counts.values())
-        print(
-            f"   [{elapsed:5.0f}s] "
-            f"Updates: {total:6d} ({total/max(1,elapsed):6.1f}/s) | "
-            f"Active: {active}/{len(symbols)}"
-        )
-
-    TestRunner.timed_loop(duration, 10, report)
-    manager.stop()
-
-    active = sum(1 for c in counts.values() if c > 0)
-    dead = [s for s, c in counts.items() if c == 0]
-
-    if dead:
-        print(f"\n   ⚠️ Dead symbols ({len(dead)}): {dead[:10]}")
-
-    TestRunner.print_summary("STRESS SUMMARY", {
-        "Symbols": len(symbols),
-        "Active": f"{active} ({100*active/len(symbols):.1f}%)",
-        "Updates": sum(counts.values()),
-    })
-
-    success = active >= len(symbols) * 0.9
-    print(f" {'✅ PASSED' if success else '❌ FAILED'}")
-    return success
-
-
-def test_backtest() -> bool:
-    """Test backtest mode functionality."""
-    TestRunner.print_header("BACKTEST TEST")
-    random.seed(42)
-
-    manager = OrderBookManager(backtest_mode=True)
-
-    # Generate test candles
-    candles = [
-        {
-            "timestamp": i * 60000,
-            "open": 50000 + random.uniform(-500, 500),
-            "high": 50000 + random.uniform(0, 600),
-            "low": 50000 - random.uniform(0, 600),
-            "close": 50000 + random.uniform(-300, 300),
-            "volume": random.uniform(100, 1000),
-        }
-        for i in range(100)
-    ]
-
-    manager.load_backtest_candles("BTC/USDT", candles)
-
-    # Verify data loaded
-    analyzer = manager.get_analyzer("BTC/USDT")
-    if not analyzer or analyzer.count != 100:
-        print(f"   ❌ Expected 100 snapshots, got {analyzer.count if analyzer else 0}")
-        return False
-
-    snapshot = manager.get_snapshot("BTC/USDT")
-    if not snapshot or not snapshot.is_valid:
-        print("   ❌ Invalid snapshot")
-        return False
-
-    # Test time-based lookup
-    snap_at_time = manager.get_backtest_snapshot("BTC/USDT", 50 * 60000)
-    if not snap_at_time:
-        print("   ❌ Time-based lookup failed")
-        return False
-
-    stats = analyzer.get_statistics()
-    print(f"   Mid price: ${stats.get('mid_price', 0):,.2f}")
-    print(f"   Spread: {stats.get('spread_bps', 0):.2f} bps")
-    print(f"   Signal: {stats.get('signal_strength', 0):+.3f}")
-
-    manager.stop()
-    print(" ✅ PASSED")
-    return True
-
-
-def test_execution_integration() -> bool:
-    """Test execution simulator integration with backtest."""
-    TestRunner.print_header("EXECUTION INTEGRATION TEST")
-    random.seed(42)
-
-    # Create backtest manager
-    manager = OrderBookManager(backtest_mode=True)
-
-    # Generate trending candles
-    candles = [
-        {
-            "timestamp": i * 60000,
-            "open": 50000 + i * 10,
-            "high": 50000 + i * 10 + 50,
-            "low": 50000 + i * 10 - 50,
-            "close": 50000 + i * 10 + 20,
-            "volume": random.uniform(100, 1000),
-        }
-        for i in range(50)
-    ]
-    manager.load_backtest_candles("BTC/USDT", candles)
-
-    # Create execution simulator
-    simulator = BacktestExecutionSimulator(
-        slippage_model="realistic",
-        fee_bps=4.0
-    )
-
-    # Simulate trades at different points
-    results = []
-    for i in range(10, 50, 5):
-        ob = manager.get_backtest_snapshot("BTC/USDT", i * 60000)
-        if ob and ob.is_valid:
-            entry_price = ob.mid_price
-            exit_price = entry_price * 1.002  # 0.2% profit target
-
-            result = simulator.simulate_round_trip(
-                entry_price,
-                exit_price,
-                0.01,
-                "buy",
-                entry_orderbook=ob
-            )
-            results.append(result)
-
-    total_pnl = sum(r["net_pnl"] for r in results)
-    wins = sum(1 for r in results if r["profitable"])
-
-    print(f"   Trades: {len(results)}")
-    print(f"   Wins: {wins}/{len(results)}")
-    print(f"   Total PnL: ${total_pnl:.4f}")
-
-    stats = simulator.get_statistics()
-    print(f"   Total Fees: ${stats['total_fees']:.6f}")
-    print(f"   Total Slippage: ${stats['total_slippage_cost']:.6f}")
-
-    manager.stop()
-    print(" ✅ PASSED")
-    return True
-
-
-def show_connection_stats() -> None:
-    """Display connection configuration."""
-    TestRunner.print_header("CONNECTION CONFIGURATION")
-
-    print("\n WebSocket Settings:")
-    print(f"   Ping interval: {OrderBookConstants.WS_PING_INTERVAL}s")
-    print(f"   Ping timeout: {OrderBookConstants.WS_PING_TIMEOUT}s")
-    print(f"   Recv timeout: {OrderBookConstants.WS_RECV_TIMEOUT}s")
-    print(f"   Max message: {OrderBookConstants.WS_MAX_MESSAGE_SIZE / 1024 / 1024:.0f}MB")
-
-    print("\n Reconnection Settings:")
-    print(f"   Max attempts: {OrderBookConstants.MAX_RECONNECT_ATTEMPTS}")
-    print(f"   Backoff: {OrderBookConstants.INITIAL_BACKOFF}s - {OrderBookConstants.MAX_BACKOFF}s")
-
-    print("\n Multi-Stream Settings:")
-    print(
-        f"   {BinanceMultiStream.MAX_STREAMS_PER_CONNECTION}/conn × "
-        f"{BinanceMultiStream.MAX_CONNECTIONS} = "
-        f"{BinanceMultiStream.MAX_STREAMS_PER_CONNECTION * BinanceMultiStream.MAX_CONNECTIONS} pairs"
-    )
-
-    print("\n Health Settings:")
-    print(f"   Stale threshold: {OrderBookConstants.STALE_DATA_MS}ms")
-    print(f"   Spread alert: {OrderBookConstants.MAX_SPREAD_BPS_ALERT}bps")
-    print(f"   Price spike: {OrderBookConstants.MAX_PRICE_SPIKE_PCT}%")
-
-    print("\n Execution Defaults:")
-    print(f"   Fee: {OrderBookConstants.DEFAULT_FEE_BPS}bps")
-    print(f"   Slippage: {OrderBookConstants.DEFAULT_SLIPPAGE_BPS}bps")
-    print(f"   Large trade threshold: {OrderBookConstants.LARGE_TRADE_THRESHOLD}")
-
-
-def test_capacity_limits() -> None:
-    """Test symbol capacity limits."""
-    TestRunner.print_header("CAPACITY LIMITS")
-
-    stream = BinanceMultiStream()
-    print(
-        f"\n Config: {stream.MAX_STREAMS_PER_CONNECTION}/conn × "
-        f"{stream.MAX_CONNECTIONS} = {stream.max_capacity}"
-    )
-
-    for size in [10, 50, 100, 200, 500, 1000]:
-        symbols = [f"S{i}/USDT" for i in range(size)]
-        chunks = stream._chunk_symbols(symbols)
-        actual = sum(len(c) for c in chunks)
-        capped = min(size, stream.max_capacity)
-        status = '✅' if actual >= capped else f'⚠️ truncated to {actual}'
-        print(f"   {size:4d} → {len(chunks)} chunks {status}")
-
-
-# ============================================================
-# MAIN ENTRY POINT
-# ============================================================
-
-def main() -> None:
-    """Main entry point."""
-    print(f"\n{'=' * 70}")
-    print(" ORACLE ORDER BOOK v4.2 (CORRECTED)")
-    print("=" * 70)
-    print(f" Python: {sys.version.split()[0]} | WS: {HAS_WEBSOCKETS} | CCXT: {HAS_CCXT_PRO}")
-
-    cmd = sys.argv[1].lower() if len(sys.argv) > 1 else ""
-
-    if cmd == "unit":
-        test_order_book()
-
-    elif cmd == "live":
-        duration = int(sys.argv[2]) if len(sys.argv) > 2 else 30
-        test_live_stream(duration)
-
-    elif cmd == "multi":
-        duration = int(sys.argv[2]) if len(sys.argv) > 2 else 30
-        num_pairs = int(sys.argv[3]) if len(sys.argv) > 3 else 10
-        test_multi_symbol(duration, num_pairs)
-
-    elif cmd == "stress":
-        duration = int(sys.argv[2]) if len(sys.argv) > 2 else 60
-        test_stress(duration)
-
-    elif cmd == "backtest":
-        test_backtest()
-
-    elif cmd == "execution":
-        test_execution_integration()
-
-    elif cmd == "stats":
-        show_connection_stats()
-
-    elif cmd == "limits":
-        test_capacity_limits()
-
-    elif cmd == "all":
-        test_order_book()
-        test_backtest()
-        test_execution_integration()
-        if HAS_WEBSOCKETS:
-            test_live_stream(15)
-            test_multi_symbol(15, 5)
-
-    elif cmd in ["help", "-h", "--help"]:
-        print("""
-Usage: python oracle_orderbook.py [command] [args]
-
-Commands:
-  unit              Run unit tests
-  live [duration]   Live stream test (default 30s)
-  multi [dur] [n]   Multi-symbol test (default 30s, 10 pairs)
-  stress [duration] Stress test all symbols (default 60s)
-  backtest          Backtest mode test
-  execution         Execution simulator integration test
-  stats             Show connection configuration
-  limits            Show capacity limits
-  all               Run all tests
-  help              Show this help
-        """)
-
-    else:
-        # Default to unit tests
-        test_order_book()
-
-
-if __name__ == "__main__":
-    main()           
-            
