@@ -1,4 +1,22 @@
 #!/usr/bin/env python3
+# ═══════════════════════════════════════════════════════════════════════════════
+# ORACLE ORDERBOOK v4.3 - FIXED & OPTIMIZED
+# 
+# Applied Fixes:
+#   - FIX 1: from_binance_fast zero-size filter (CRITICAL)
+#   - FIX 2: ThrottledCallback race condition (BUG)
+#   - FIX 3: StateManager debounced save (PERF)
+#   - FIX 4: BacktestAnalyzer O(n)->O(1) (PERF)
+#   - FIX 5: Single time call in hot path (PERF)
+#   - FIX 6: Dict cleanup + orphan removal (LEAK)
+#   - FIX 7: Worker NumPy check (SAFETY)
+#   - FIX 8: MMapTickStore overwrite protection (SAFETY)
+#   - FIX 9: Numba empty array guard (CRASH)
+#
+# Fixed by: Oracle Orderbook Fixer v2.0
+# Date: 2025-12-01 20:18:39
+# ═══════════════════════════════════════════════════════════════════════════════
+
 """
 oracle_orderbook.py - ORACLE ORDER BOOK v4.2 — SHARED CORE COMPONENT
 
@@ -379,23 +397,27 @@ class OrderBookSnapshot:
         sequence: int = 0
     ) -> 'OrderBookSnapshot':
         """Ultra-fast path for Binance depth streams."""
-        n_bids = min(20, len(bids))
-        n_asks = min(20, len(asks))
+        # FIX 1: Filter zero-size levels (consistency with from_raw)
+        parsed_bids: List[OrderBookLevel] = []
+        parsed_asks: List[OrderBookLevel] = []
 
-        parsed_bids: List[OrderBookLevel] = [None] * n_bids
-        parsed_asks: List[OrderBookLevel] = [None] * n_asks
+        for i in range(min(20, len(bids))):
+            price = float(bids[i][0])
+            size = float(bids[i][1])
+            if size > 0:  # Skip zero-size levels
+                level = object.__new__(OrderBookLevel)
+                level.price = price
+                level.size = size
+                parsed_bids.append(level)
 
-        for i in range(n_bids):
-            level = object.__new__(OrderBookLevel)
-            level.price = float(bids[i][0])
-            level.size = float(bids[i][1])
-            parsed_bids[i] = level
-
-        for i in range(n_asks):
-            level = object.__new__(OrderBookLevel)
-            level.price = float(asks[i][0])
-            level.size = float(asks[i][1])
-            parsed_asks[i] = level
+        for i in range(min(20, len(asks))):
+            price = float(asks[i][0])
+            size = float(asks[i][1])
+            if size > 0:  # Skip zero-size levels
+                level = object.__new__(OrderBookLevel)
+                level.price = price
+                level.size = size
+                parsed_asks.append(level)
 
         snapshot = object.__new__(cls)
         snapshot.symbol = symbol
@@ -747,9 +769,16 @@ class DataValidator:
         )
         keep = {s for s, _ in sorted_symbols[:self._max_symbols - 1]}
 
-        for symbol in set(self._price_history.keys()) - keep:
+        # FIX 6: Atomic cleanup with orphan removal
+        to_remove = set(self._price_history.keys()) - keep
+        for symbol in to_remove:
             self._price_history.pop(symbol, None)
             self._last_access.pop(symbol, None)
+        
+        # Clean any orphaned entries in _last_access
+        for symbol in list(self._last_access.keys()):
+            if symbol not in self._price_history:
+                self._last_access.pop(symbol, None)
 
     def validate(self, snapshot: OrderBookSnapshot) -> Tuple[bool, List[str]]:
         """Validate a snapshot for anomalies."""
@@ -865,15 +894,17 @@ class ThrottledCallback:
     def flush(self) -> None:
         """Invoke pending callback immediately if any."""
         pending = None
+        callback = None  # FIX 2: Capture callback reference under lock
         with self._lock:
             pending = self._pending
             self._pending = None
             if pending is not None:
                 self._last_call = time.time() * 1000
+                callback = self._callback  # Capture while holding lock
 
-        if pending is not None:
+        if callback is not None and pending is not None:
             try:
-                self._callback(pending)
+                callback(pending)
             except Exception as e:
                 logger.error(f"Throttled callback flush error: {e}")
 
@@ -1113,6 +1144,8 @@ class StateManager:
         self._state: Dict[str, Any] = {}
         self._lock = threading.RLock()
         self._auto_save = True
+        self._dirty = False  # FIX 3: Debounce tracking
+        self._last_save = 0.0  # FIX 3: Last save timestamp
         self._cleanup_temp_files()
         self._load()
 
@@ -1190,8 +1223,17 @@ class StateManager:
         """Set a value in state."""
         with self._lock:
             self._state[key] = value
+            self._dirty = True  # FIX 3: Mark as dirty
         if auto_save and self._auto_save:
-            self.save()
+            self._debounced_save()  # FIX 3: Use debounced save
+
+    def _debounced_save(self) -> None:
+        """FIX 3: Save with 5-second debounce to reduce disk I/O."""
+        now = time.time()
+        if self._dirty and now - self._last_save > 5.0:
+            if self.save():
+                self._dirty = False
+                self._last_save = now
 
     def delete(self, key: str, auto_save: bool = True) -> None:
         """Delete a key from state."""
@@ -3184,8 +3226,9 @@ class BinanceMultiStream(_StreamBase):
             if not bids and not asks:
                 return
 
-            timestamp = payload.get("E", _now_ms())
-            now = time.time()
+            now_ms = _now_ms()  # FIX 5: Single time call
+            timestamp = payload.get("E", now_ms)
+            now = now_ms / 1000.0  # Convert to seconds
 
             snapshot = OrderBookSnapshot.from_binance_fast(
                 symbol=symbol,
@@ -4288,7 +4331,7 @@ class BacktestAnalyzer:
         Args:
             max_snapshots: Maximum snapshots to retain
         """
-        self._snapshots: List['OrderBookSnapshot'] = []
+        self._snapshots: Deque['OrderBookSnapshot'] = deque(maxlen=max_snapshots)  # FIX 4: O(1)
         self._max_size = max_snapshots
         self._stats_cache: Optional[Dict[str, Any]] = None
         self._stats_cache_key: int = 0
@@ -4311,10 +4354,7 @@ class BacktestAnalyzer:
                 self._seq_gaps += snap.sequence - self._last_seq - 1
             self._last_seq = snap.sequence
         
-        # Maintain max size (simple pop from front)
-        if len(self._snapshots) >= self._max_size:
-            self._snapshots.pop(0)
-        
+        # FIX 4: deque maxlen auto-handles size limit - O(1) vs O(n)
         self._snapshots.append(snap)
         self._total += 1
         self._stats_cache = None
@@ -4609,6 +4649,9 @@ def _process_chunk_worker(
     compute_ob: bool
 ) -> List[Dict]:
     """Worker function for parallel processing (must be top-level for pickling)."""
+    # FIX 7: Verify NumPy availability in worker process
+    if not HAS_NUMPY:
+        raise RuntimeError("NumPy required for parallel backtest workers")
     engine = FastBacktestEngine(seed=seed)
     results = engine.process_candle_batch(candles, ticks, compute_ob)
     
@@ -4662,12 +4705,19 @@ class MMapTickStore:
         self.filepath = Path(filepath)
         self._data: Optional[np.ndarray] = None
     
-    def create(self, ticks: List[Tuple[int, float, float]]) -> None:
+    def create(self, ticks: List[Tuple[int, float, float]], overwrite: bool = False) -> None:
         """Create memory-mapped file from tick list.
         
         Args:
             ticks: List of (timestamp, price, size) tuples
+            overwrite: If False (default), raises error if file exists
         """
+        # FIX 8: Prevent accidental data loss
+        if self.filepath.exists() and not overwrite:
+            raise FileExistsError(
+                f"Tick store already exists: {self.filepath}. "
+                f"Use overwrite=True to replace."
+            )
         # Sort by timestamp
         sorted_ticks = sorted(ticks, key=lambda x: x[0])
         
@@ -4895,6 +4945,9 @@ if HAS_NUMBA:
         Returns:
             Average fill price
         """
+        # FIX 9: Guard against empty arrays
+        if len(prices) == 0:
+            return 0.0
         remaining = order_size
         cost = 0.0
         
